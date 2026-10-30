@@ -70,6 +70,24 @@ function regen_config() {
   return 0
 }
 
+# 用户输入会原样拼进 JSON / gost URI, 这里挡掉会破坏解析的字符
+function valid_secret() {
+  local v="$1" label="$2"
+  [[ -n ${v} ]] || die "${label}不能为空"
+  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* && ${v} != *':'* ]] ||
+    die "${label}不能包含空格、引号、反斜杠、#、@、:（这些字符会破坏配置文件与 URI 的解析）"
+}
+function valid_host() {
+  local v="$1" label="$2"
+  [[ -n ${v} ]] || die "${label}不能为空"
+  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* ]] ||
+    die "${label}不能包含空格、引号、反斜杠、#、@"
+}
+function valid_port() {
+  local v="$1" label="$2"
+  [[ ${v} =~ ^[0-9]+$ ]] && ((10#${v} >= 1 && 10#${v} <= 65535)) || die "${label}必须是 1-65535 的数字"
+}
+
 function checknew() {
   command -v gost >/dev/null 2>&1 || die "gost 尚未安装，请先执行菜单 1 安装"
   local old_ver backup_dir
@@ -344,16 +362,20 @@ function read_s_port() {
   if [ "$flag_a" == "ss" ]; then
     echo -e "-----------------------------------"
     read -p "请输入ss密码: " flag_b
+    valid_secret "${flag_b}" "ss密码"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "-----------------------------------"
     read -p "请输入socks密码: " flag_b
+    valid_secret "${flag_b}" "socks密码"
   elif [ "$flag_a" == "http" ]; then
     echo -e "-----------------------------------"
     read -p "请输入http密码: " flag_b
+    valid_secret "${flag_b}" "http密码"
   else
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要将本机哪个端口接收到的流量进行转发?"
     read -p "请输入: " flag_b
+    valid_port "${flag_b}" "本地监听端口"
   fi
 }
 function read_d_ip() {
@@ -389,9 +411,11 @@ function read_d_ip() {
   elif [ "$flag_a" == "socks" ]; then
     echo -e "-----------------------------------"
     read -p "请输入socks用户名: " flag_c
+    valid_secret "${flag_c}" "socks用户名"
   elif [ "$flag_a" == "http" ]; then
     echo -e "-----------------------------------"
     read -p "请输入http用户名: " flag_c
+    valid_secret "${flag_c}" "http用户名"
   elif [[ "$flag_a" == "peer"* ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请输入落地列表文件名"
@@ -410,8 +434,10 @@ function read_d_ip() {
     while true; do
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向的IP或域名?"
       read -p "请输入: " peer_ip
+      valid_host "${peer_ip}" "落地IP或域名"
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向${peer_ip}的哪个端口?"
       read -p "请输入: " peer_port
+      valid_port "${peer_port}" "落地端口"
       echo -e "$peer_ip:$peer_port" >>"${peer_file}"
       read -e -p "是否继续添加落地？[Y/n]:" addyn
       [[ -z ${addyn} ]] && addyn="y"
@@ -429,6 +455,7 @@ function read_d_ip() {
     echo -e "------------------------------------------------------------------"
     echo -e "将本机从${flag_b}接收到的流量转发向的自选ip:"
     read -p "请输入: " flag_c
+    valid_host "${flag_c}" "自选IP"
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
     echo -e "[1] 80"
     echo -e "[2] 443"
@@ -440,6 +467,7 @@ function read_d_ip() {
       flag_c="$flag_c:443"
     elif [ "$cdnport" == "3" ]; then
       read -p "请输入自定义端口: " customport
+      valid_port "${customport}" "自定义端口"
       flag_c="$flag_c:$customport"
     else
       echo "type error, please try again"
@@ -454,6 +482,7 @@ function read_d_ip() {
       echo -e "注意: 落地机开启自定义tls证书，务必填写${Red_font_prefix}域名${Font_color_suffix}"
     fi
     read -p "请输入: " flag_c
+    valid_host "${flag_c}" "目的地IP或域名"
   fi
 }
 function read_d_port() {
@@ -461,14 +490,17 @@ function read_d_port() {
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置ss代理服务的端口?"
     read -p "请输入: " flag_d
+    valid_port "${flag_d}" "ss代理端口"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置socks代理服务的端口?"
     read -p "请输入: " flag_d
+    valid_port "${flag_d}" "socks代理端口"
   elif [ "$flag_a" == "http" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置http代理服务的端口?"
     read -p "请输入: " flag_d
+    valid_port "${flag_d}" "http代理端口"
   elif [[ "$flag_a" == "peer"* ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "您要设置的均衡负载策略: "
@@ -492,17 +524,20 @@ function read_d_port() {
   elif [[ "$flag_a" == "cdn"* ]]; then
     echo -e "------------------------------------------------------------------"
     read -p "请输入host:" flag_d
+    valid_host "${flag_d}" "host"
   else
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
     read -p "请输入: " flag_d
+    valid_port "${flag_d}" "目的地端口"
     if [[ ${is_cert} == [Yy] ]]; then
       flag_d="$flag_d?secure=true"
     fi
   fi
 }
 function writerawconf() {
-  echo $flag_a"/""$flag_b""#""$flag_c""#""$flag_d" >>$raw_conf_path
+  # 用 printf 而不是 echo: 密码以 -n/-e 开头时 echo 会当成选项吞掉内容
+  printf '%s/%s#%s#%s\n' "$flag_a" "$flag_b" "$flag_c" "$flag_d" >>"$raw_conf_path"
 }
 function rawconf() {
   read_protocol
@@ -992,7 +1027,12 @@ function show_all_conf() {
       str=""
     fi
 
-    echo -e " $i  |$str  |$s_port\t|$d_ip:$d_port"
+    if [[ ${is_encrypt} == "ss" || ${is_encrypt} == "socks" || ${is_encrypt} == "http" ]]; then
+      # 这三类里 s_port 存的是密码、d_ip 存的是加密方式/用户名, 原表格会把密码当端口打印
+      echo -e " $i  |$str  |$d_port\t|$d_ip (密码已隐藏)"
+    else
+      echo -e " $i  |$str  |$s_port\t|$d_ip:$d_port"
+    fi
     echo -e "--------------------------------------------------------"
   done
 }
