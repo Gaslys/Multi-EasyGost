@@ -21,6 +21,55 @@ function warn() {
   echo -e "${Warn} $*" >&2
 }
 
+function json_ok() {
+  local f="$1"
+  [[ -s ${f} ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq empty "${f}" >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${f}" >/dev/null 2>&1
+  else
+    # 没有校验工具时退化为最小检查, 至少挡住空文件和明显残缺
+    grep -q '"ServeNodes"' "${f}" && tail -c 3 "${f}" | grep -q "}"
+  fi
+}
+
+# 由 rawconf 重新生成 config.json: 先备份、生成后校验、失败回滚, 避免把坏配置推给 gost
+function regen_config() {
+  local bak
+  [[ -d /etc/gost ]] || die "gost 尚未安装或配置文件目录不存在，请先执行菜单 1 安装"
+  if [[ ! -s ${raw_conf_path} ]]; then
+    warn "未找到转发配置 ${raw_conf_path}，跳过重建，仅重启服务"
+    return 0
+  fi
+  bak=$(mktemp) || die "无法创建临时文件"
+  if [[ -f ${gost_conf_path} ]]; then
+    cp -a "${gost_conf_path}" "${bak}" || die "备份现有配置失败，已中止"
+  fi
+  : >"${gost_conf_path}" || die "无法写入 ${gost_conf_path}（权限不足？）"
+  confstart
+  writeconf
+  local rc=$?
+  conflast
+  if ((rc != 0)) || ! json_ok "${gost_conf_path}"; then
+    warn "生成的配置无效，已回滚到上一份配置（请检查 rawconf 是否被手工改坏）"
+    if [[ -s ${bak} ]]; then
+      cp -a "${bak}" "${gost_conf_path}"
+    else
+      rm -f "${gost_conf_path}"
+    fi
+    rm -f "${bak}"
+    return 1
+  fi
+  if [[ -s ${bak} ]]; then
+    cp -a "${bak}" "${gost_conf_path}.bak"
+    chmod 0600 "${gost_conf_path}.bak"
+  fi
+  rm -f "${bak}"
+  chmod 0600 "${gost_conf_path}"
+  return 0
+}
+
 function checknew() {
   command -v gost >/dev/null 2>&1 || die "gost 尚未安装，请先执行菜单 1 安装"
   local old_ver backup_dir
@@ -243,11 +292,10 @@ function Stop_ct() {
   echo "已停止"
 }
 function Restart_ct() {
-  rm -rf /etc/gost/config.json
-  confstart
-  writeconf
-  conflast
+  regen_config || warn "配置重建失败，已回滚到上一份配置，继续以旧配置重启"
   systemctl restart gost
+  sleep 1
+  systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
   echo "已重读配置并重启"
 }
 function read_protocol() {
@@ -858,30 +906,42 @@ function method() {
 }
 
 function writeconf() {
-  count_line=$(awk 'END{print NR}' $raw_conf_path)
-  for ((i = 1; i <= $count_line; i++)); do
-    if [ $i -eq 1 ]; then
-      trans_conf=$(sed -n "${i}p" $raw_conf_path)
-      eachconf_retrieve
-      method
-    elif [ $i -gt 1 ]; then
-      if [ $i -eq 2 ]; then
-        echo "    ],
-    \"Routes\": [" >>$gost_conf_path
-        trans_conf=$(sed -n "${i}p" $raw_conf_path)
-        eachconf_retrieve
-        multiconfstart
-        method
-        multiconflast
-      else
-        trans_conf=$(sed -n "${i}p" $raw_conf_path)
-        eachconf_retrieve
-        multiconfstart
-        method
-        multiconflast
-      fi
+  local trans_conf idx=0 total=0
+  # 先数一遍有效行: multiconflast 用 count_line 判断是否是最后一个对象(决定加不加逗号)
+  while IFS= read -r trans_conf || [[ -n ${trans_conf} ]]; do
+    trans_conf=${trans_conf%$'\r'}
+    [[ -z ${trans_conf//[[:space:]]/} ]] && continue
+    [[ ${trans_conf} != *"#"*"#"* ]] && continue
+    total=$((total + 1))
+  done <"${raw_conf_path}"
+  count_line=${total}
+  while IFS= read -r trans_conf || [[ -n ${trans_conf} ]]; do
+    trans_conf=${trans_conf%$'\r'} # 兼容 Windows 换行, 否则 \r 会进到 JSON 字符串里
+    [[ -z ${trans_conf//[[:space:]]/} ]] && continue
+    if [[ ${trans_conf} != *"#"*"#"* ]]; then
+      warn "跳过无法解析的配置行: ${trans_conf}"
+      continue
     fi
-  done
+    idx=$((idx + 1))
+    i=${idx}
+    eachconf_retrieve
+    if ((idx == 1)); then
+      method
+    else
+      if ((idx == 2)); then
+        echo "    ],
+    \"Routes\": [" >>"${gost_conf_path}"
+      fi
+      multiconfstart
+      method
+      multiconflast
+    fi
+  done <"${raw_conf_path}"
+  if ((idx == 0)); then
+    warn "没有可用的转发配置"
+    return 1
+  fi
+  return 0
 }
 function show_all_conf() {
   echo -e "                      GOST 配置                        "
@@ -1086,14 +1146,16 @@ case "$num" in
   ;;
 7)
   rawconf
-  rm -rf /etc/gost/config.json
-  confstart
-  writeconf
-  conflast
-  systemctl restart gost
-  echo -e "配置已生效，当前配置如下"
-  echo -e "--------------------------------------------------------"
-  show_all_conf
+  if regen_config; then
+    systemctl restart gost
+    sleep 1
+    systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+    echo -e "配置已生效，当前配置如下"
+    echo -e "--------------------------------------------------------"
+    show_all_conf
+  else
+    warn "新规则未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
+  fi
   ;;
 8)
   show_all_conf
@@ -1105,12 +1167,14 @@ case "$num" in
   # 原来只校验"含一个数字", "1e 命令" 这类输入能通过; GNU sed 的 e 地址修饰符会执行命令
   if [[ ${numdelete} =~ ^[0-9]+$ ]] && ((10#${numdelete} >= 1 && 10#${numdelete} <= ${count_line:-0})); then
     sed -i "${numdelete}d" "${raw_conf_path}"
-    rm -rf /etc/gost/config.json
-    confstart
-    writeconf
-    conflast
-    systemctl restart gost
-    echo -e "配置已删除，服务已重启"
+    if regen_config; then
+      systemctl restart gost
+      sleep 1
+      systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+      echo -e "配置已删除，服务已重启"
+    else
+      warn "剩余配置未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
+    fi
   else
     echo "请输入正确数字"
   fi
