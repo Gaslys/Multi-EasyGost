@@ -5,7 +5,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.2.5"
+shell_version="1.2.6"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -14,6 +14,10 @@ update_url="https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost.sh"
 cron_file="/etc/cron.d/gost-restart"
 # 均衡负载的落地列表必须放在 gost 进程(User=root)可读的位置, 且与配置里写的路径一致
 peer_dir="/root"
+# gost 以 root 运行, 证书路径必须固定; 不能跟着运行脚本的用户的 $HOME 走
+cert_dir="/root/gost_cert"
+# 由 checknew 设置: 它已经确认并备份过, Install_ct 不必再问一次
+reinstall_confirmed=0
 
 function die() {
   echo -e "${Error} $*" >&2
@@ -33,12 +37,15 @@ function json_ok() {
   else
     # 没有校验工具时退化为最小检查, 至少挡住空文件和明显残缺
     grep -q '"ServeNodes"' "${f}" && tail -c 3 "${f}" | grep -q "}"
-  fi
+  fi || return 1
+  # 语法合法还不够: ServeNodes 为空数组时 gost 直接 invalid config 退出。
+  # 之前只校验语法, 空配置会被当成"生成成功"覆盖上去, 然后把服务带进重启循环
+  grep -q '://' "${f}"
 }
 
 # 由 rawconf 重新生成 config.json: 先备份、生成后校验、失败回滚, 避免把坏配置推给 gost
 function regen_config() {
-  local bak
+  local dup target tmpcfg
   regen_stopped=0
   [[ -d /etc/gost ]] || die "gost 尚未安装或配置文件目录不存在，请先执行菜单 1 安装"
   if [[ ! -f ${raw_conf_path} ]]; then
@@ -58,38 +65,37 @@ function regen_config() {
     echo -e "${Info} 已没有可用的转发规则，gost 服务已停止，旧配置已保留为 config.json.bak"
     return 0
   fi
-  local dup
   dup=$(duplicate_ports)
   if [[ -n ${dup} ]]; then
     warn "以下监听端口在多条规则里重复，gost 会因 address already in use 起不来：$(echo "${dup}" | tr '\n' ' ')"
     warn "已保留当前配置未覆盖，请用菜单 9 删除冲突规则后重试"
     return 1
   fi
-  bak=$(mktemp) || die "无法创建临时文件"
-  if [[ -f ${gost_conf_path} ]]; then
-    cp -a "${gost_conf_path}" "${bak}" || die "备份现有配置失败，已中止"
-  fi
-  : >"${gost_conf_path}" || die "无法写入 ${gost_conf_path}（权限不足？）"
+  # 先写到临时文件、校验通过再原子替换: 中途 Ctrl-C / SSH 断线不会把正在用的配置截断
+  target="${gost_conf_path}"
+  tmpcfg="${target}.new.$$"
+  : >"${tmpcfg}" || die "无法写入 ${target}（权限不足？）"
+  gost_conf_path="${tmpcfg}"
   confstart
   writeconf
   local rc=$?
   conflast
-  if ((rc != 0)) || ! json_ok "${gost_conf_path}"; then
-    warn "生成的配置无效，已回滚到上一份配置（请检查 rawconf 是否被手工改坏）"
-    if [[ -s ${bak} ]]; then
-      cp -a "${bak}" "${gost_conf_path}"
-    else
-      rm -f "${gost_conf_path}"
-    fi
-    rm -f "${bak}"
+  gost_conf_path="${target}"
+  if ((rc != 0)) || ! json_ok "${tmpcfg}"; then
+    warn "生成的配置无效，已保留上一份配置（请检查 rawconf 是否被手工改坏）"
+    rm -f "${tmpcfg}"
     return 1
   fi
-  if [[ -s ${bak} ]]; then
-    cp -a "${bak}" "${gost_conf_path}.bak"
-    chmod 0600 "${gost_conf_path}.bak"
+  chmod 0600 "${tmpcfg}"
+  if [[ -f ${target} ]]; then
+    cp -a "${target}" "${target}.bak" 2>/dev/null && chmod 0600 "${target}.bak" 2>/dev/null
   fi
-  rm -f "${bak}"
-  chmod 0600 "${gost_conf_path}"
+  if ! mv -f "${tmpcfg}" "${target}"; then
+    warn "替换配置失败，已保留上一份配置"
+    rm -f "${tmpcfg}"
+    return 1
+  fi
+  chmod 0600 "${target}"
   return 0
 }
 
@@ -97,14 +103,15 @@ function regen_config() {
 function valid_secret() {
   local v="$1" label="$2"
   [[ -n ${v} ]] || die "${label}不能为空"
-  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* && ${v} != *':'* ]] ||
-    die "${label}不能包含空格、引号、反斜杠、#、@、:（这些字符会破坏配置文件与 URI 的解析）"
+  # / 是 rawconf 的字段分隔符, ? 与 % 会破坏 gost 的 URI 解析
+  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* && ${v} != *':'* && ${v} != */* && ${v} != *'?'* && ${v} != *'%'* ]] ||
+    die "${label}不能包含空格、引号、反斜杠、#、@、:、/、?、%（这些字符会破坏 rawconf 或 URI 的解析）"
 }
 function valid_host() {
   local v="$1" label="$2"
   [[ -n ${v} ]] || die "${label}不能为空"
-  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* ]] ||
-    die "${label}不能包含空格、引号、反斜杠、#、@"
+  [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* && ${v} != */* && ${v} != *'?'* && ${v} != *'%'* ]] ||
+    die "${label}不能包含空格、引号、反斜杠、#、@、/、?、%"
 }
 function valid_port() {
   local v="$1" label="$2"
@@ -125,6 +132,7 @@ function checknew() {
     if [[ -d /etc/gost ]]; then
       cp -a /etc/gost/. "${backup_dir}/" || die "备份 /etc/gost 失败，已中止更新"
     fi
+    reinstall_confirmed=1
     Install_ct
     # Install_ct 会重建 /etc/gost（装着默认配置），这里把用户原有配置放回去
     if [[ -f "${backup_dir}/rawconf" ]]; then
@@ -179,17 +187,17 @@ function check_sys() {
 }
 function download() {
   local url="$1" dest="$2"
+  # 不再在 TLS 校验失败后降级重试: 能阻断 TLS 的人同样能替换二进制,
+  # 而版本号字符串是任何人都能伪造的
   if command -v wget >/dev/null 2>&1; then
     wget -q --tries=3 --timeout=20 -O "${dest}" "${url}" && return 0
-    warn "TLS 校验失败，回退为不校验证书重试一次（请自行确认下载源可信）"
-    wget -q --no-check-certificate --tries=3 --timeout=20 -O "${dest}" "${url}" && return 0
+    warn "下载失败（网络不通或证书校验未通过），已中止，未改动现有安装"
     return 1
   fi
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --retry 3 --connect-timeout 10 --max-time 180 -o "${dest}" "${url}" && return 0
-    warn "TLS 校验失败，回退为不校验证书重试一次（请自行确认下载源可信）"
-    curl -fsSLk --retry 3 --connect-timeout 10 --max-time 180 -o "${dest}" "${url}"
-    return $?
+    warn "下载失败（网络不通或证书校验未通过），已中止，未改动现有安装"
+    return 1
   fi
   return 1
 }
@@ -235,32 +243,53 @@ function check_nor_file() {
 }
 function Install_ct() {
   check_root
-  check_nor_file
   Installation_dependency
   check_file
   check_sys
 
-  local bin_url tmpdir
+  local bin_url tmpdir backup_dir="" ans
   # 原来的国内镜像(gotunnel.oss-cn-shenzhen.aliyuncs.com)已失效, 三个文件全部 404,
   # 选"是"只会白等一次失败, 因此移除该选项, 统一从 GitHub Releases 下载
   bin_url="https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${bit}-${ct_new_ver}.gz"
+
+  # 已安装时先确认并备份 /etc/gost。原脚本在这之前就 rm -rf 了旧文件,
+  # 下载失败或架构选错就是"重装一次清一次库"
+  if [[ -x /usr/bin/gost || -f /usr/lib/systemd/system/gost.service || -d /etc/gost ]]; then
+    if ((reinstall_confirmed)); then
+      :
+    else
+      echo -e "${Warn} 检测到已安装的 gost：将替换二进制与 unit，现有转发配置会保留"
+      read -r -p "是否继续重装？[y/N]:" ans
+      [[ ${ans} == [Yy] ]] || {
+        echo "已取消"
+        return 1
+      }
+    fi
+    backup_dir=$(mktemp -d "${HOME:-/root}/.gost-backup.XXXXXX") || die "无法创建备份目录"
+    if [[ -d /etc/gost ]]; then
+      cp -a /etc/gost/. "${backup_dir}/" || die "备份 /etc/gost 失败，已中止安装"
+    fi
+  fi
 
   tmpdir=$(mktemp -d "${HOME:-/root}/.gost-install.XXXXXX") || die "无法创建临时目录"
   echo -e "${Info} 正在下载 gost v${ct_new_ver} (${bit}) ..."
   if ! download "${bin_url}" "${tmpdir}/gost.gz"; then
     rm -rf "${tmpdir}"
-    die "gost 下载失败，请检查网络连接或更换下载源"
+    die "gost 下载失败，现有安装未改动"
   fi
   if ! gunzip -f "${tmpdir}/gost.gz"; then
     rm -rf "${tmpdir}"
-    die "gost 解压失败，下载内容可能已损坏"
+    die "gost 解压失败，下载内容可能已损坏，现有安装未改动"
   fi
   chmod 0755 "${tmpdir}/gost"
   # 装之前先跑一下：能执行且版本号正确，才说明这是完整、未篡改、架构匹配的二进制
   if ! "${tmpdir}/gost" -V 2>&1 | grep -qF "${ct_new_ver}"; then
     rm -rf "${tmpdir}"
-    die "下载的 gost 无法运行或版本不符（可能被篡改、不完整，或架构选择错误），已中止安装"
+    die "下载的 gost 无法运行或版本不符（可能被篡改、不完整，或架构选择错误），已中止安装，现有安装未改动"
   fi
+
+  # 到这里下载与校验都通过了, 才开始动旧文件
+  check_nor_file
 
   # systemd unit 与默认配置改为脚本本地生成，不再从网络下载，
   # 避免 unit 文件被中间人替换后以 root 身份执行
@@ -291,10 +320,20 @@ UNIT
 }
 CONF
 
-  install -m 0755 "${tmpdir}/gost" /usr/bin/gost || { rm -rf "${tmpdir}"; die "安装 gost 二进制失败"; }
-  install -m 0644 "${tmpdir}/gost.service" /usr/lib/systemd/system/gost.service || { rm -rf "${tmpdir}"; die "安装 service 文件失败"; }
+  install -m 0755 "${tmpdir}/gost" /usr/bin/gost || { rm -rf "${tmpdir}"; die "安装 gost 二进制失败，原配置备份在 ${backup_dir:-无}"; }
+  install -m 0644 "${tmpdir}/gost.service" /usr/lib/systemd/system/gost.service || { rm -rf "${tmpdir}"; die "安装 service 文件失败，原配置备份在 ${backup_dir:-无}"; }
   mkdir -p /etc/gost && chmod 0700 /etc/gost
-  install -m 0644 "${tmpdir}/config.json" /etc/gost/config.json || { rm -rf "${tmpdir}"; die "安装默认配置失败"; }
+  install -m 0644 "${tmpdir}/config.json" /etc/gost/config.json || { rm -rf "${tmpdir}"; die "安装默认配置失败，原配置备份在 ${backup_dir:-无}"; }
+
+  # 重装/更新: 把备份里的转发配置放回去; 全新安装则保留默认配置
+  if [[ -n ${backup_dir} && -f "${backup_dir}/rawconf" ]]; then
+    install -m 0644 "${backup_dir}/rawconf" "${raw_conf_path}" || warn "恢复 rawconf 失败"
+    if [[ -f "${backup_dir}/config.json" ]]; then
+      install -m 0600 "${backup_dir}/config.json" "${gost_conf_path}" || warn "恢复 config.json 失败"
+    fi
+    echo -e "${Info} 已恢复原有转发配置"
+  fi
+  [[ -n ${backup_dir} ]] && rm -rf "${backup_dir}"
   rm -rf "${tmpdir}"
 
   systemctl daemon-reload
@@ -310,6 +349,13 @@ CONF
 }
 function Uninstall_ct() {
   check_root
+  local ans
+  echo -e "${Warn} 即将停止并删除 gost、/etc/gost 下的全部转发配置和定时重启任务"
+  read -r -p "确认卸载？[y/N]:" ans
+  [[ ${ans} == [Yy] ]] || {
+    echo "已取消"
+    return 1
+  }
   systemctl stop gost >/dev/null 2>&1
   systemctl disable gost >/dev/null 2>&1
   rm -f /usr/bin/gost
@@ -378,7 +424,7 @@ function read_protocol() {
   echo -e "[6] 进阶：转发CDN自选节点"
   echo -e "说明: 只需在中转机设置"
   echo -e "-----------------------------------"
-  read -p "请选择: " numprotocol
+  read -r -p "请选择: " numprotocol
 
   if [ "$numprotocol" == "1" ]; then
     flag_a="nonencrypt"
@@ -400,20 +446,20 @@ function read_protocol() {
 function read_s_port() {
   if [ "$flag_a" == "ss" ]; then
     echo -e "-----------------------------------"
-    read -p "请输入ss密码: " flag_b
+    read -r -p "请输入ss密码: " flag_b
     valid_secret "${flag_b}" "ss密码"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "-----------------------------------"
-    read -p "请输入socks密码: " flag_b
+    read -r -p "请输入socks密码: " flag_b
     valid_secret "${flag_b}" "socks密码"
   elif [ "$flag_a" == "http" ]; then
     echo -e "-----------------------------------"
-    read -p "请输入http密码: " flag_b
+    read -r -p "请输入http密码: " flag_b
     valid_secret "${flag_b}" "http密码"
   else
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要将本机哪个端口接收到的流量进行转发?"
-    read -p "请输入: " flag_b
+    read -r -p "请输入: " flag_b
     valid_port "${flag_b}" "本地监听端口"
     flag_b=$((10#${flag_b}))
     listen_port_taken "${flag_b}" && die "端口 ${flag_b} 已被现有规则占用，请换一个（多条规则不能监听同一端口）"
@@ -431,7 +477,7 @@ function read_d_ip() {
     echo -e "[5] rc4-md5"
     echo -e "[6] AEAD_CHACHA20_POLY1305"
     echo -e "-----------------------------------"
-    read -p "请选择ss加密方式: " ssencrypt
+    read -r -p "请选择ss加密方式: " ssencrypt
 
     if [ "$ssencrypt" == "1" ]; then
       flag_c="aes-256-gcm"
@@ -451,22 +497,22 @@ function read_d_ip() {
     fi
   elif [ "$flag_a" == "socks" ]; then
     echo -e "-----------------------------------"
-    read -p "请输入socks用户名: " flag_c
+    read -r -p "请输入socks用户名: " flag_c
     valid_secret "${flag_c}" "socks用户名"
   elif [ "$flag_a" == "http" ]; then
     echo -e "-----------------------------------"
-    read -p "请输入http用户名: " flag_c
+    read -r -p "请输入http用户名: " flag_c
     valid_secret "${flag_c}" "http用户名"
   elif [[ "$flag_a" == "peer"* ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请输入落地列表文件名"
-    read -e -p "自定义但不同配置应不重复，不用输入后缀，例如ips1、iplist2: " flag_c
+    read -r -e -p "自定义但不同配置应不重复，不用输入后缀，例如ips1、iplist2: " flag_c
     [[ ${flag_c} =~ ^[A-Za-z0-9_-]+$ ]] || die "文件名只能包含字母、数字、下划线和连字符"
     # 原来 touch 在当前工作目录建文件, 但生成的配置里写死 /root/xxx.txt:
     # 只要不是从 /root 运行脚本, 落地列表就建错地方, 均衡负载静默失效
     local peer_file="${peer_dir}/${flag_c}.txt"
     if [[ -f ${peer_file} ]]; then
-      read -e -p "${peer_file} 已存在，是否覆盖？[y/N]:" overwrite
+      read -r -e -p "${peer_file} 已存在，是否覆盖？[y/N]:" overwrite
       [[ ${overwrite} == [Yy] ]] || die "已取消，可先编辑 ${peer_file} 后再用菜单 6 重启生效"
     fi
     mkdir -p "${peer_dir}" && : >"${peer_file}" || die "无法写入 ${peer_file}"
@@ -474,14 +520,14 @@ function read_d_ip() {
     echo -e "请依次输入你要均衡负载的落地ip与端口"
     while true; do
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向的IP或域名?"
-      read -p "请输入: " peer_ip
+      read -r -p "请输入: " peer_ip
       valid_host "${peer_ip}" "落地IP或域名"
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向${peer_ip}的哪个端口?"
-      read -p "请输入: " peer_port
+      read -r -p "请输入: " peer_port
       valid_port "${peer_port}" "落地端口"
       peer_port=$((10#${peer_port}))
       echo -e "$peer_ip:$peer_port" >>"${peer_file}"
-      read -e -p "是否继续添加落地？[Y/n]:" addyn
+      read -r -e -p "是否继续添加落地？[Y/n]:" addyn
       [[ -z ${addyn} ]] && addyn="y"
       if [[ ${addyn} == [Nn] ]]; then
         echo -e "------------------------------------------------------------------"
@@ -496,19 +542,19 @@ function read_d_ip() {
   elif [[ "$flag_a" == "cdn"* ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "将本机从${flag_b}接收到的流量转发向的自选ip:"
-    read -p "请输入: " flag_c
+    read -r -p "请输入: " flag_c
     valid_host "${flag_c}" "自选IP"
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
     echo -e "[1] 80"
     echo -e "[2] 443"
     echo -e "[3] 自定义端口（如8080等）"
-    read -p "请选择端口: " cdnport
+    read -r -p "请选择端口: " cdnport
     if [ "$cdnport" == "1" ]; then
       flag_c="$flag_c:80"
     elif [ "$cdnport" == "2" ]; then
       flag_c="$flag_c:443"
     elif [ "$cdnport" == "3" ]; then
-      read -p "请输入自定义端口: " customport
+      read -r -p "请输入自定义端口: " customport
       valid_port "${customport}" "自定义端口"
       customport=$((10#${customport}))
       flag_c="$flag_c:$customport"
@@ -524,7 +570,7 @@ function read_d_ip() {
     if [[ ${is_cert} == [Yy] ]]; then
       echo -e "注意: 落地机开启自定义tls证书，务必填写${Red_font_prefix}域名${Font_color_suffix}"
     fi
-    read -p "请输入: " flag_c
+    read -r -p "请输入: " flag_c
     valid_host "${flag_c}" "目的地IP或域名"
   fi
 }
@@ -532,21 +578,21 @@ function read_d_port() {
   if [ "$flag_a" == "ss" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置ss代理服务的端口?"
-    read -p "请输入: " flag_d
+    read -r -p "请输入: " flag_d
     valid_port "${flag_d}" "ss代理端口"
     flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置socks代理服务的端口?"
-    read -p "请输入: " flag_d
+    read -r -p "请输入: " flag_d
     valid_port "${flag_d}" "socks代理端口"
     flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "http" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置http代理服务的端口?"
-    read -p "请输入: " flag_d
+    read -r -p "请输入: " flag_d
     valid_port "${flag_d}" "http代理端口"
     flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
@@ -558,7 +604,7 @@ function read_d_port() {
     echo -e "[2] random - 随机"
     echo -e "[3] fifo - 自上而下"
     echo -e "-----------------------------------"
-    read -p "请选择均衡负载类型: " numstra
+    read -r -p "请选择均衡负载类型: " numstra
 
     if [ "$numstra" == "1" ]; then
       flag_d="round"
@@ -572,12 +618,12 @@ function read_d_port() {
     fi
   elif [[ "$flag_a" == "cdn"* ]]; then
     echo -e "------------------------------------------------------------------"
-    read -p "请输入host:" flag_d
+    read -r -p "请输入host:" flag_d
     valid_host "${flag_d}" "host"
   else
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
-    read -p "请输入: " flag_d
+    read -r -p "请输入: " flag_d
     valid_port "${flag_d}" "目的地端口"
     flag_d=$((10#${flag_d}))
     if [[ ${is_cert} == [Yy] ]]; then
@@ -636,18 +682,18 @@ function encrypt() {
   echo -e "[3] wss隧道"
   echo -e "注意: 同一则转发，中转与落地传输类型必须对应！本脚本默认开启tcp+udp"
   echo -e "-----------------------------------"
-  read -p "请选择转发传输类型: " numencrypt
+  read -r -p "请选择转发传输类型: " numencrypt
 
   if [ "$numencrypt" == "1" ]; then
     flag_a="encrypttls"
     echo -e "注意: 选择 是 将针对落地的自定义证书开启证书校验保证安全性，稍后落地机务必填写${Red_font_prefix}域名${Font_color_suffix}"
-    read -e -p "落地机是否开启了自定义tls证书？[y/n]:" is_cert
+    read -r -e -p "落地机是否开启了自定义tls证书？[y/n]:" is_cert
   elif [ "$numencrypt" == "2" ]; then
     flag_a="encryptws"
   elif [ "$numencrypt" == "3" ]; then
     flag_a="encryptwss"
     echo -e "注意: 选择 是 将针对落地的自定义证书开启证书校验保证安全性，稍后落地机务必填写${Red_font_prefix}域名${Font_color_suffix}"
-    read -e -p "落地机是否开启了自定义tls证书？[y/n]:" is_cert
+    read -r -e -p "落地机是否开启了自定义tls证书？[y/n]:" is_cert
   else
     echo "type error, please try again"
     exit
@@ -664,7 +710,7 @@ function enpeer() {
   echo -e "此脚本仅支持简单型均衡负载，具体可参考官方文档"
   echo -e "gost均衡负载官方文档：https://docs.ginuerzh.xyz/gost/load-balancing"
   echo -e "-----------------------------------"
-  read -p "请选择转发传输类型: " numpeer
+  read -r -p "请选择转发传输类型: " numpeer
 
   if [ "$numpeer" == "1" ]; then
     flag_a="peerno"
@@ -689,7 +735,7 @@ function cdn() {
   echo -e "注意: 同一则转发，中转与落地传输类型必须对应！"
   echo -e "此功能只需在中转机设置"
   echo -e "-----------------------------------"
-  read -p "请选择CDN转发传输类型: " numcdn
+  read -r -p "请选择CDN转发传输类型: " numcdn
 
   if [ "$numcdn" == "1" ]; then
     flag_a="cdnno"
@@ -709,7 +755,7 @@ function cert() {
   echo -e "-----------------------------------"
   echo -e "说明: 仅用于落地机配置，默认使用的gost内置的证书可能带来安全问题，使用自定义证书提高安全性"
   echo -e "     配置后对本机所有tls/wss解密生效，无需再次设置"
-  read -p "请选择证书生成方式: " numcert
+  read -r -p "请选择证书生成方式: " numcert
 
   if [ "$numcert" == "1" ]; then
     check_sys
@@ -718,26 +764,27 @@ function cert() {
     else
       apt-get install -y socat
     fi
-    read -p "请输入ZeroSSL的账户邮箱(至 zerossl.com 注册即可)：" zeromail
-    read -p "请输入解析到本机的域名：" domain
-    curl https://get.acme.sh | sh
+    read -r -p "请输入ZeroSSL的账户邮箱(至 zerossl.com 注册即可)：" zeromail
+    read -r -p "请输入解析到本机的域名：" domain
+    command -v curl >/dev/null 2>&1 || die "未找到 curl，无法安装 acme.sh"
+    curl -fsSL https://get.acme.sh | sh
+    [[ -x "$HOME/.acme.sh/acme.sh" ]] || die "acme.sh 安装失败（$HOME/.acme.sh/acme.sh 不存在），请检查网络后重试"
     "$HOME"/.acme.sh/acme.sh --set-default-ca --server zerossl
-    "$HOME"/.acme.sh/acme.sh --register-account -m "${zeromail}" --server zerossl
+    "$HOME"/.acme.sh/acme.sh --register-account -m "${zeromail}" --server zerossl || die "ZeroSSL 账户注册失败"
     echo -e "ACME证书申请程序安装成功"
     echo -e "-----------------------------------"
     echo -e "[1] HTTP申请（需要80端口未占用）"
     echo -e "[2] Cloudflare DNS API 申请（需要输入APIKEY）"
     echo -e "-----------------------------------"
-    read -p "请选择证书申请方式: " certmethod
+    read -r -p "请选择证书申请方式: " certmethod
     if [ "$certmethod" == "1" ]; then
       echo -e "请确认本机${Red_font_prefix}80${Font_color_suffix}端口未被占用, 否则会申请失败"
       if "$HOME"/.acme.sh/acme.sh --issue -d "${domain}" --standalone -k ec-256 --force; then
         echo -e "SSL 证书生成成功，默认申请高安全性的ECC证书"
-        if [ ! -d "$HOME/gost_cert" ]; then
-          mkdir $HOME/gost_cert
-        fi
-        if "$HOME"/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath $HOME/gost_cert/cert.pem --keypath $HOME/gost_cert/key.pem --ecc --force; then
-          echo -e "SSL 证书配置成功，且会自动续签，证书及秘钥位于用户目录下的 ${Red_font_prefix}gost_cert${Font_color_suffix} 目录"
+        mkdir -p "${cert_dir}" || die "无法创建 ${cert_dir}"
+        if "$HOME"/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath "${cert_dir}/cert.pem" --keypath "${cert_dir}/key.pem" --ecc --force; then
+          chmod 0600 "${cert_dir}/key.pem" 2>/dev/null
+          echo -e "SSL 证书配置成功，且会自动续签，证书及秘钥位于 ${Red_font_prefix}${cert_dir}${Font_color_suffix}"
           echo -e "证书目录名与证书文件名请勿更改; 删除 gost_cert 目录后用脚本重启,即自动启用gost内置证书"
           echo -e "-----------------------------------"
         fi
@@ -746,17 +793,16 @@ function cert() {
         exit 1
       fi
     else
-      read -p "请输入Cloudflare账户邮箱：" cfmail
-      read -p "请输入Cloudflare Global API Key：" cfkey
+      read -r -p "请输入Cloudflare账户邮箱：" cfmail
+      read -r -p "请输入Cloudflare Global API Key：" cfkey
       export CF_Key="${cfkey}"
       export CF_Email="${cfmail}"
       if "$HOME"/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" --standalone -k ec-256 --force; then
         echo -e "SSL 证书生成成功，默认申请高安全性的ECC证书"
-        if [ ! -d "$HOME/gost_cert" ]; then
-          mkdir $HOME/gost_cert
-        fi
-        if "$HOME"/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath $HOME/gost_cert/cert.pem --keypath $HOME/gost_cert/key.pem --ecc --force; then
-          echo -e "SSL 证书配置成功，且会自动续签，证书及秘钥位于用户目录下的 ${Red_font_prefix}gost_cert${Font_color_suffix} 目录"
+        mkdir -p "${cert_dir}" || die "无法创建 ${cert_dir}"
+        if "$HOME"/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath "${cert_dir}/cert.pem" --keypath "${cert_dir}/key.pem" --ecc --force; then
+          chmod 0600 "${cert_dir}/key.pem" 2>/dev/null
+          echo -e "SSL 证书配置成功，且会自动续签，证书及秘钥位于 ${Red_font_prefix}${cert_dir}${Font_color_suffix}"
           echo -e "证书目录名与证书文件名请勿更改; 删除 gost_cert 目录后使用脚本重启, 即重新启用gost内置证书"
           echo -e "-----------------------------------"
         fi
@@ -767,11 +813,9 @@ function cert() {
     fi
 
   elif [ "$numcert" == "2" ]; then
-    if [ ! -d "$HOME/gost_cert" ]; then
-      mkdir $HOME/gost_cert
-    fi
+    mkdir -p "${cert_dir}" || die "无法创建 ${cert_dir}"
     echo -e "-----------------------------------"
-    echo -e "已在用户目录建立 ${Red_font_prefix}gost_cert${Font_color_suffix} 目录，请将证书文件 cert.pem 与秘钥文件 key.pem 上传到该目录"
+    echo -e "已创建 ${Red_font_prefix}${cert_dir}${Font_color_suffix} 目录，请将证书文件 cert.pem 与秘钥文件 key.pem 上传到该目录"
     echo -e "证书与秘钥文件名必须与上述一致，目录名也请勿更改"
     echo -e "上传成功后，用脚本重启gost会自动启用，无需再设置; 删除 gost_cert 目录后用脚本重启,即重新启用gost内置证书"
     echo -e "-----------------------------------"
@@ -788,7 +832,7 @@ function decrypt() {
   echo -e "[3] wss"
   echo -e "注意: 同一则转发，中转与落地传输类型必须对应！本脚本默认开启tcp+udp"
   echo -e "-----------------------------------"
-  read -p "请选择解密传输类型: " numdecrypt
+  read -r -p "请选择解密传输类型: " numdecrypt
 
   if [ "$numdecrypt" == "1" ]; then
     flag_a="decrypttls"
@@ -809,7 +853,7 @@ function proxy() {
   echo -e "[2] socks5(强烈建议加隧道用于Telegram代理)"
   echo -e "[3] http"
   echo -e "-----------------------------------"
-  read -p "请选择代理类型: " numproxy
+  read -r -p "请选择代理类型: " numproxy
   if [ "$numproxy" == "1" ]; then
     flag_a="ss"
   elif [ "$numproxy" == "2" ]; then
@@ -881,16 +925,16 @@ function method() {
 	\"ChainNodes\": [
     	\"relay+wss://$d_ip?host=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "decrypttls" ]; then
-      if [ -d "$HOME/gost_cert" ]; then
-        echo "        \"relay+tls://:$s_port/$d_ip:$d_port?cert=/root/gost_cert/cert.pem&key=/root/gost_cert/key.pem\"" >>$gost_conf_path
+      if [ -d "${cert_dir}" ]; then
+        echo "        \"relay+tls://:$s_port/$d_ip:$d_port?cert=${cert_dir}/cert.pem&key=${cert_dir}/key.pem\"" >>$gost_conf_path
       else
         echo "        \"relay+tls://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
       fi
     elif [ "$is_encrypt" == "decryptws" ]; then
       echo "        \"relay+ws://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "decryptwss" ]; then
-      if [ -d "$HOME/gost_cert" ]; then
-        echo "        \"relay+wss://:$s_port/$d_ip:$d_port?cert=/root/gost_cert/cert.pem&key=/root/gost_cert/key.pem\"" >>$gost_conf_path
+      if [ -d "${cert_dir}" ]; then
+        echo "        \"relay+wss://:$s_port/$d_ip:$d_port?cert=${cert_dir}/cert.pem&key=${cert_dir}/key.pem\"" >>$gost_conf_path
       else
         echo "        \"relay+wss://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
       fi
@@ -901,7 +945,8 @@ function method() {
     elif [ "$is_encrypt" == "http" ]; then
       echo "        \"http://$d_ip:$s_port@:$d_port\"" >>$gost_conf_path
     else
-      echo "config error"
+      warn "无法识别的规则类型 ${is_encrypt}（rawconf 可能被手工改坏），已中止生成"
+      return 1
     fi
   elif [ $i -gt 1 ]; then
     if [ "$is_encrypt" == "nonencrypt" ]; then
@@ -962,16 +1007,16 @@ function method() {
             \"ChainNodes\": [
                 \"relay+wss://$d_ip?host=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "decrypttls" ]; then
-      if [ -d "$HOME/gost_cert" ]; then
-        echo "        		  \"relay+tls://:$s_port/$d_ip:$d_port?cert=/root/gost_cert/cert.pem&key=/root/gost_cert/key.pem\"" >>$gost_conf_path
+      if [ -d "${cert_dir}" ]; then
+        echo "        		  \"relay+tls://:$s_port/$d_ip:$d_port?cert=${cert_dir}/cert.pem&key=${cert_dir}/key.pem\"" >>$gost_conf_path
       else
         echo "        		  \"relay+tls://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
       fi
     elif [ "$is_encrypt" == "decryptws" ]; then
       echo "        		  \"relay+ws://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "decryptwss" ]; then
-      if [ -d "$HOME/gost_cert" ]; then
-        echo "        		  \"relay+wss://:$s_port/$d_ip:$d_port?cert=/root/gost_cert/cert.pem&key=/root/gost_cert/key.pem\"" >>$gost_conf_path
+      if [ -d "${cert_dir}" ]; then
+        echo "        		  \"relay+wss://:$s_port/$d_ip:$d_port?cert=${cert_dir}/cert.pem&key=${cert_dir}/key.pem\"" >>$gost_conf_path
       else
         echo "        		  \"relay+wss://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
       fi
@@ -982,7 +1027,8 @@ function method() {
     elif [ "$is_encrypt" == "http" ]; then
       echo "        \"http://$d_ip:$s_port@:$d_port\"" >>$gost_conf_path
     else
-      echo "config error"
+      warn "无法识别的规则类型 ${is_encrypt}（rawconf 可能被手工改坏），已中止生成"
+      return 1
     fi
   else
     echo "config error"
@@ -1008,14 +1054,14 @@ function writeconf() {
     i=${idx}
     eachconf_retrieve
     if ((idx == 1)); then
-      method
+      method || return 1
     else
       if ((idx == 2)); then
         echo "    ],
     \"Routes\": [" >>"${gost_conf_path}"
       fi
       multiconfstart
-      method
+      method || return 1
       multiconflast
     fi
   done <"${raw_conf_path}"
@@ -1026,6 +1072,10 @@ function writeconf() {
   return 0
 }
 function show_all_conf() {
+  if [[ ! -f ${raw_conf_path} ]]; then
+    warn "未找到 ${raw_conf_path}，请先安装（菜单 1）并新增转发规则（菜单 7）"
+    return 1
+  fi
   echo -e "                      GOST 配置                        "
   echo -e "--------------------------------------------------------"
   echo -e "序号|方法\t    |本地端口\t|目的地地址:目的地端口"
@@ -1034,6 +1084,7 @@ function show_all_conf() {
   count_line=$(awk 'END{print NR}' $raw_conf_path)
   for ((i = 1; i <= $count_line; i++)); do
     trans_conf=$(sed -n "${i}p" $raw_conf_path)
+    trans_conf=${trans_conf%$'\r'}
     if ! valid_rule_line "${trans_conf}"; then
       [[ -z ${trans_conf//[[:space:]]/} ]] && continue
       echo -e " $i  |无法解析|  -  |${trans_conf}"
@@ -1099,7 +1150,7 @@ cron_restart() {
   echo -e "[1] 配置gost定时重启任务"
   echo -e "[2] 删除gost定时重启任务"
   echo -e "-----------------------------------"
-  read -p "请选择: " numcron
+  read -r -p "请选择: " numcron
   if [[ ${numcron} == "1" ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "gost定时重启任务类型: "
@@ -1107,18 +1158,18 @@ cron_restart() {
     echo -e "[1] 每？小时重启"
     echo -e "[2] 每日？点重启"
     echo -e "-----------------------------------"
-    read -p "请选择: " numcrontype
+    read -r -p "请选择: " numcrontype
     local cron_line
     if [[ ${numcrontype} == "1" ]]; then
       echo -e "-----------------------------------"
-      read -p "每？小时重启: " cronhr
+      read -r -p "每？小时重启: " cronhr
       if ! [[ ${cronhr} =~ ^[0-9]+$ ]] || ((10#${cronhr} < 1 || 10#${cronhr} > 23)); then
         die "小时数必须是 1-23 的整数"
       fi
       cron_line="0 */${cronhr} * * * root systemctl restart gost"
     elif [[ ${numcrontype} == "2" ]]; then
       echo -e "-----------------------------------"
-      read -p "每日？点重启: " cronhr
+      read -r -p "每日？点重启: " cronhr
       if ! [[ ${cronhr} =~ ^[0-9]+$ ]] || ((10#${cronhr} > 23)); then
         die "时刻必须是 0-23 的整数"
       fi
@@ -1269,6 +1320,11 @@ update_sh() {
           warn "下载内容不是有效脚本或版本不符，已保留当前脚本"
           return 1
         fi
+        if [[ ! -f "$0" || ${0##*/} == "bash" || ${0##*/} == "sh" ]]; then
+          rm -f "$tmp"
+          warn "当前不是以脚本文件方式运行（如 curl | bash），无法原地更新，请手动下载"
+          return 1
+        fi
         chmod 0755 "$tmp"
         if ! mv -f "$tmp" "$0"; then
           rm -f "$tmp"
@@ -1292,7 +1348,7 @@ update_sh() {
 check_root
 show_banner
 update_sh
-read -e -p " 请输入数字 [0-11]:" num
+read -r -e -p " 请输入数字 [0-11]:" num
 case "$num" in
 1)
   Install_ct
@@ -1334,7 +1390,7 @@ case "$num" in
   ;;
 9)
   show_all_conf
-  read -p "请输入你要删除的配置编号：" numdelete
+  read -r -p "请输入你要删除的配置编号：" numdelete
   count_line=$(awk 'END{print NR}' "${raw_conf_path}" 2>/dev/null)
   # 原来只校验"含一个数字", "1e 命令" 这类输入能通过; GNU sed 的 e 地址修饰符会执行命令
   if [[ ${numdelete} =~ ^[0-9]+$ ]] && ((10#${numdelete} >= 1 && 10#${numdelete} <= ${count_line:-0})); then

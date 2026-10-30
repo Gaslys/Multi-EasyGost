@@ -1,7 +1,7 @@
 # Multi-EasyGost 一键脚本使用指南
 
 > 本仓库是 [KANIKIG/Multi-EasyGost](https://github.com/KANIKIG/Multi-EasyGost) 的个人 fork（分支 `v2`）。
-> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.5**，gost 固定 **v2.11.2**。
+> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.6**，gost 固定 **v2.11.2**。
 > 逐条改动与验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ***
@@ -49,7 +49,10 @@ curl -fsSL -o gost.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2
   且安装前先跑一次 `gost -V` 校验版本，拦截被篡改、截断或架构不符的文件。
 - 权限收紧：二进制 0755、unit 0644、`/etc/gost` 0700、配置 0600。
   上游有 `chmod -R 777`，连 `/usr/lib/systemd/system` 都会被递归改成全局可写。
-- 输入校验：端口、主机、密码在读取时即校验，挡掉会破坏 JSON / URI / rawconf 的字符。
+- 输入校验：端口、主机、密码在读取时即校验，挡掉会破坏 JSON / URI / rawconf 的字符
+  （含 `/`、`?`、`%`——`/` 是 rawconf 的分隔符，`?` 与 `%` 会让 gost 解析 URI 失败）。
+- 安装改为先下载、解压、跑 `gost -V` 校验，全部通过后才替换旧文件；已安装时重装会二次确认并保留配置。
+- 配置重建先写临时文件、校验通过后原子替换，中途中断不会把正在用的 `config.json` 截断。
 - 菜单 9 的删除编号改为严格数字校验（上游只判断「含一个数字」，存在 sed 地址注入）。
 - 移除失效的国内镜像选项（原地址三个文件全部 404）。
 
@@ -93,5 +96,4 @@ curl -fsSL -o gost.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2
 
 - gost v2 上游已停止维护，长期看应迁移到 v3（配置格式完全不同）。
 - 仅支持 systemd 与 Debian / Ubuntu / CentOS 系发行版。
-- `method()` 里仍有两份重复的配置生成分支，脚本内 43 处 `read` 未加 `-r`，
-  属风格问题，本轮保守修复未动。
+- `method()` 里仍有两份重复的配置生成分支，属风格问题，本轮保守修复未动。
