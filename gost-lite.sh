@@ -7,7 +7,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.0.2"
+shell_version="1.0.3"
 ct_new_ver="2.11.2"
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -469,6 +469,7 @@ function list_rules() {
 function add_rule() {
   local port ip dport
   command -v gost >/dev/null 2>&1 || die "gost 尚未安装，请先执行菜单 1 安装"
+  [[ -d /etc/gost ]] || die "配置目录 /etc/gost 不存在，请先执行菜单 1 重新安装"
   ensure_lite || return 1
   echo -e "------------------------------------------------------------------"
   read -r -p "本机用哪个端口接收流量: " port
@@ -486,6 +487,8 @@ function add_rule() {
   dport=$((10#${dport}))
 
   snapshot_rawconf
+  # rawconf 末尾没有换行时(手改/别的工具写过)先补一个, 否则新规则会接在上一条后面, 两条一起失效
+  [[ -s ${raw_conf_path} && -n $(tail -c 1 "${raw_conf_path}") ]] && printf '\n' >>"${raw_conf_path}"
   printf 'nonencrypt/%s#%s#%s\n' "${port}" "${ip}" "${dport}" >>"${raw_conf_path}" || {
     restore_rawconf
     die "写入 ${raw_conf_path} 失败"
