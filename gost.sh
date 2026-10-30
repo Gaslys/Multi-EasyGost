@@ -3,6 +3,8 @@ Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_p
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
+Cyan_font_prefix="\033[36m"
+Bold="\033[1m"
 shell_version="1.2.0"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
@@ -1089,6 +1091,51 @@ cron_restart() {
   fi
 }
 
+# 统计 rawconf 里有效规则条数(与 writeconf 的判定保持一致)
+function count_rules() {
+  local n=0 line
+  [[ -f ${raw_conf_path} ]] || {
+    echo 0
+    return
+  }
+  while IFS= read -r line || [[ -n ${line} ]]; do
+    line=${line%$'\r'}
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    [[ ${line} != *"#"*"#"* ]] && continue
+    n=$((n + 1))
+  done <"${raw_conf_path}"
+  echo "${n}"
+}
+
+function show_banner() {
+  local ver state color rules
+  echo
+  echo -e "  ${Bold}${Green_font_prefix}gost 一键安装配置脚本${Font_color_suffix}   ${Bold}v${shell_version}${Font_color_suffix}"
+  echo -e "  ${Cyan_font_prefix}Gaslys fork of KANIKIG/Multi-EasyGost${Font_color_suffix}"
+  echo -e "  ------------------------------------------------------------"
+  if command -v gost >/dev/null 2>&1; then
+    ver=$(gost -V 2>/dev/null | awk '{print $2}')
+    if systemctl is-active --quiet gost 2>/dev/null; then
+      state="运行中"
+      color="${Green_font_prefix}"
+    else
+      state="未运行"
+      color="${Red_font_prefix}"
+    fi
+    rules=$(count_rules)
+    echo -e "  ${color}●${Font_color_suffix} ${state} · gost ${ver:-未知} · 转发规则 ${rules} 条"
+  else
+    echo -e "  ${Red_font_prefix}●${Font_color_suffix} 未安装 · 选择 1 开始安装"
+  fi
+  echo -e "  文档 https://github.com/Gaslys/Multi-EasyGost"
+  echo
+  echo -e "    ${Green_font_prefix}1${Font_color_suffix} 安装      ${Green_font_prefix}2${Font_color_suffix} 更新      ${Green_font_prefix}3${Font_color_suffix} 卸载      ${Green_font_prefix}4${Font_color_suffix} 启动"
+  echo -e "    ${Green_font_prefix}5${Font_color_suffix} 停止      ${Green_font_prefix}6${Font_color_suffix} 重启      ${Green_font_prefix}7${Font_color_suffix} 新增      ${Green_font_prefix}8${Font_color_suffix} 查看"
+  echo -e "    ${Green_font_prefix}9${Font_color_suffix} 删除      ${Green_font_prefix}10${Font_color_suffix} 定时重启 ${Green_font_prefix}11${Font_color_suffix} 证书"
+  echo -e "  ------------------------------------------------------------"
+  echo
+}
+
 update_sh() {
   local ol_version tmp
   ol_version=$(curl -fsSL --connect-timeout 5 --max-time 8 "${update_url}" 2>/dev/null | grep -m1 "shell_version=" | awk -F '=|"' '{print $3}')
@@ -1129,38 +1176,16 @@ update_sh() {
 
       esac
     else
-      echo -e "                 ${Green_font_prefix}当前版本为最新版本！${Font_color_suffix}"
+      echo -e "  ${Green_font_prefix}当前版本为最新版本！${Font_color_suffix}"
     fi
   else
-    echo -e "                 ${Red_font_prefix}脚本最新版本获取失败，请检查与github的连接！${Font_color_suffix}"
+    echo -e "  ${Red_font_prefix}脚本最新版本获取失败，请检查与 github 的连接！${Font_color_suffix}"
   fi
 }
 
 check_root
+show_banner
 update_sh
-echo && echo -e "                 gost 一键安装配置脚本"${Red_font_prefix}[${shell_version}]${Font_color_suffix}"
-  ----------- KANIKIG -----------
-  特性: (1)本脚本采用systemd及gost配置文件对gost进行管理
-        (2)能够在不借助其他工具(如screen)的情况下实现多条转发规则同时生效
-        (3)机器reboot后转发不失效
-  功能: (1)tcp+udp不加密转发, (2)中转机加密转发, (3)落地机解密对接转发
-  帮助文档：https://github.com/KANIKIG/Multi-EasyGost
-
- ${Green_font_prefix}1.${Font_color_suffix} 安装 gost
- ${Green_font_prefix}2.${Font_color_suffix} 更新 gost
- ${Green_font_prefix}3.${Font_color_suffix} 卸载 gost
-————————————
- ${Green_font_prefix}4.${Font_color_suffix} 启动 gost
- ${Green_font_prefix}5.${Font_color_suffix} 停止 gost
- ${Green_font_prefix}6.${Font_color_suffix} 重启 gost
-————————————
- ${Green_font_prefix}7.${Font_color_suffix} 新增gost转发配置
- ${Green_font_prefix}8.${Font_color_suffix} 查看现有gost配置
- ${Green_font_prefix}9.${Font_color_suffix} 删除一则gost配置
-————————————
- ${Green_font_prefix}10.${Font_color_suffix} gost定时重启配置
- ${Green_font_prefix}11.${Font_color_suffix} 自定义TLS证书配置
-————————————" && echo
 read -e -p " 请输入数字 [1-11]:" num
 case "$num" in
 1)
@@ -1223,6 +1248,6 @@ case "$num" in
   cert
   ;;
 *)
-  echo "请输入正确数字 [1-11]"
+  echo "  请输入正确数字 [1-11]"
   ;;
 esac
