@@ -39,6 +39,7 @@ function json_ok() {
 # 由 rawconf 重新生成 config.json: 先备份、生成后校验、失败回滚, 避免把坏配置推给 gost
 function regen_config() {
   local bak
+  regen_stopped=0
   [[ -d /etc/gost ]] || die "gost 尚未安装或配置文件目录不存在，请先执行菜单 1 安装"
   if [[ ! -f ${raw_conf_path} ]]; then
     warn "未找到转发配置 ${raw_conf_path}，跳过重建，仅重启服务"
@@ -48,7 +49,13 @@ function regen_config() {
   # 保留旧配置又会让刚删掉的规则继续生效, 所以这里直接把服务停掉
   if (( $(count_rules) == 0 )); then
     systemctl stop gost >/dev/null 2>&1
-    echo -e "${Info} 已没有可用的转发规则，gost 服务已停止（无规则时 gost 无法启动）"
+    # 把旧配置挪走: 否则菜单 4/6 一启动, 刚删掉的规则就会按旧配置复活
+    if [[ -f ${gost_conf_path} ]]; then
+      mv -f "${gost_conf_path}" "${gost_conf_path}.bak" 2>/dev/null
+      chmod 0600 "${gost_conf_path}.bak" 2>/dev/null
+    fi
+    regen_stopped=1
+    echo -e "${Info} 已没有可用的转发规则，gost 服务已停止，旧配置已保留为 config.json.bak"
     return 0
   fi
   local dup
@@ -313,6 +320,11 @@ function Uninstall_ct() {
   echo "gost已经成功删除"
 }
 function Start_ct() {
+  # 规则被删光时 config.json 已移走; 若 rawconf 存在但为空, 直接启动只会拿到旧配置
+  if [[ -f ${raw_conf_path} ]] && (( $(count_rules) == 0 )); then
+    warn "当前没有转发规则，请先用菜单 7 新增（若想直接用现有 config.json，可删除 ${raw_conf_path}）"
+    return 1
+  fi
   if ! systemctl start gost 2>/dev/null; then
     warn "启动失败，gost 可能尚未安装，请先执行菜单 1"
     return 1
@@ -334,6 +346,10 @@ function Stop_ct() {
 }
 function Restart_ct() {
   regen_config || warn "配置重建失败，已回滚到上一份配置，继续以旧配置重启"
+  if ((regen_stopped)); then
+    echo "当前没有转发规则，gost 保持停止；执行菜单 7 新增规则后会自动启动"
+    return 0
+  fi
   systemctl restart gost
   sleep 1
   systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
@@ -1146,15 +1162,20 @@ function rule_listen_port() {
   sp=${f1#*/}
   rest=${line#*#}
   f3=${rest#*#}
+  local p
   case "${t}" in
-  ss | socks | http) echo "${f3}" ;;
-  *) echo "${sp}" ;;
+  ss | socks | http) p=${f3} ;;
+  *) p=${sp} ;;
   esac
+  # 归一成十进制: "010000" 与 "10000" 是同一个端口
+  [[ ${p} =~ ^[0-9]+$ ]] && p=$((10#${p}))
+  echo "${p}"
 }
 
 # 该监听端口是否已被现有规则占用
 function listen_port_taken() {
   local port="$1" line
+  [[ ${port} =~ ^[0-9]+$ ]] && port=$((10#${port}))
   [[ -f ${raw_conf_path} ]] || return 1
   while IFS= read -r line || [[ -n ${line} ]]; do
     line=${line%$'\r'}
@@ -1279,12 +1300,16 @@ case "$num" in
 7)
   rawconf
   if regen_config; then
-    systemctl restart gost
-    sleep 1
-    systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
-    echo -e "配置已生效，当前配置如下"
-    echo -e "--------------------------------------------------------"
-    show_all_conf
+    if ((regen_stopped)); then
+      warn "配置为空，服务保持停止"
+    else
+      systemctl restart gost
+      sleep 1
+      systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+      echo -e "配置已生效，当前配置如下"
+      echo -e "--------------------------------------------------------"
+      show_all_conf
+    fi
   else
     warn "新规则未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
   fi
@@ -1300,10 +1325,14 @@ case "$num" in
   if [[ ${numdelete} =~ ^[0-9]+$ ]] && ((10#${numdelete} >= 1 && 10#${numdelete} <= ${count_line:-0})); then
     sed -i "${numdelete}d" "${raw_conf_path}"
     if regen_config; then
-      systemctl restart gost
-      sleep 1
-      systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
-      echo -e "配置已删除，服务已重启"
+      if ((regen_stopped)); then
+        echo -e "配置已删除，规则已清空，gost 服务已停止"
+      else
+        systemctl restart gost
+        sleep 1
+        systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+        echo -e "配置已删除，服务已重启"
+      fi
     else
       warn "剩余配置未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
     fi
