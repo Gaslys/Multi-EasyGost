@@ -415,6 +415,7 @@ function read_s_port() {
     echo -e "请问你要将本机哪个端口接收到的流量进行转发?"
     read -p "请输入: " flag_b
     valid_port "${flag_b}" "本地监听端口"
+    flag_b=$((10#${flag_b}))
     listen_port_taken "${flag_b}" && die "端口 ${flag_b} 已被现有规则占用，请换一个（多条规则不能监听同一端口）"
   fi
 }
@@ -478,6 +479,7 @@ function read_d_ip() {
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向${peer_ip}的哪个端口?"
       read -p "请输入: " peer_port
       valid_port "${peer_port}" "落地端口"
+      peer_port=$((10#${peer_port}))
       echo -e "$peer_ip:$peer_port" >>"${peer_file}"
       read -e -p "是否继续添加落地？[Y/n]:" addyn
       [[ -z ${addyn} ]] && addyn="y"
@@ -508,6 +510,7 @@ function read_d_ip() {
     elif [ "$cdnport" == "3" ]; then
       read -p "请输入自定义端口: " customport
       valid_port "${customport}" "自定义端口"
+      customport=$((10#${customport}))
       flag_c="$flag_c:$customport"
     else
       echo "type error, please try again"
@@ -531,18 +534,21 @@ function read_d_port() {
     echo -e "请问你要设置ss代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "ss代理端口"
+    flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置socks代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "socks代理端口"
+    flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "http" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置http代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "http代理端口"
+    flag_d=$((10#${flag_d}))
     listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [[ "$flag_a" == "peer"* ]]; then
     echo -e "------------------------------------------------------------------"
@@ -573,6 +579,7 @@ function read_d_port() {
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "目的地端口"
+    flag_d=$((10#${flag_d}))
     if [[ ${is_cert} == [Yy] ]]; then
       flag_d="$flag_d?secure=true"
     fi
@@ -1000,6 +1007,11 @@ function writeconf() {
       warn "跳过无法解析的配置行: ${trans_conf}"
       continue
     fi
+    # 字段里的空格会让生成的 URI 变成 "tcp://: 10000/..." 这种, JSON 校验能过但 gost 解析失败
+    if [[ ${trans_conf} == *[[:space:]]* ]]; then
+      warn "跳过含空白的配置行: ${trans_conf}"
+      continue
+    fi
     idx=$((idx + 1))
     i=${idx}
     eachconf_retrieve
@@ -1194,6 +1206,7 @@ function duplicate_ports() {
     line=${line%$'\r'}
     [[ -z ${line//[[:space:]]/} ]] && continue
     [[ ${line} != *"#"*"#"* ]] && continue
+    [[ ${line} == *[[:space:]]* ]] && continue
     rule_listen_port "${line}"
   done <"${raw_conf_path}" | sort | uniq -d
 }
