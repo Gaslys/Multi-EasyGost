@@ -1,60 +1,97 @@
-# Multi-EasyGost一键脚本使用指南
+# Multi-EasyGost 一键脚本使用指南
+
+> 本仓库是 [KANIKIG/Multi-EasyGost](https://github.com/KANIKIG/Multi-EasyGost) 的个人 fork（分支 `v2`）。
+> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.0**，gost 固定 **v2.11.2**。
+> 逐条改动与验证记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ***
-## 感谢: 
-1. 感谢 @ginuerzh 大佬开发的 [gost](https://github.com/ginuerzh/gost) 隧道程序 ，功能强大使用简单，想要详细了解的朋友可以查看[官方文档](https://docs.ginuerzh.xyz/gost/)
+## 感谢
+
+1. 感谢 @ginuerzh 大佬开发的 [gost](https://github.com/ginuerzh/gost) 隧道程序，功能强大使用简单，想要详细了解的朋友可以查看[官方文档](https://docs.ginuerzh.xyz/gost/)
 2. 感谢 @风萧萧兮易水寒 大佬的[原始脚本](https://www.fiisi.com/?p=125)
-3. 感谢 @ STSDUST 提供的EasyGost脚本（已删库），此脚本是基于其进行修改增强
+3. 感谢 @STSDUST 提供的 EasyGost 脚本（已删库），此脚本是基于其进行修改增强
+4. 感谢 @KANIKIG 维护的 [Multi-EasyGost](https://github.com/KANIKIG/Multi-EasyGost)，本仓库在其基础上做修复
+
 ***
 ## 简介
 
-> 项目地址及帮助文档:  
-> https://github.com/KANIKIG/Multi-EasyGost
+- 本仓库：`https://github.com/Gaslys/Multi-EasyGost`
+- 上游：`https://github.com/KANIKIG/Multi-EasyGost`
+
 ***
 ## 脚本
 
-* 启动脚本  
-  `wget --no-check-certificate -O gost.sh https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh && chmod +x gost.sh && ./gost.sh`  
-* 再次运行本脚本只需要输入`./gost.sh`回车即可  
+一键安装并启动菜单：
 
-> 注：由于 gost v2.11.2 功能稳定，此脚本将一直采用该版本，后续不再跟随官方更新
+```bash
+curl -fsSL -o gost.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost.sh && chmod +x gost.sh && ./gost.sh
+```
 
+再次运行只需输入 `./gost.sh` 回车。
+
+> 注：gost v2.11.2 功能稳定，本脚本固定使用该版本。脚本启动时会对比本仓库的版本号提示更新，
+> 不会把你更新回上游的旧版本。
+
+***
+## 本 fork 相对上游的改动（1.2.0）
+
+只挑使用者能感知到的部分，完整清单见 [CHANGELOG.md](CHANGELOG.md)。
+
+- 定时重启真正生效：改写 `/etc/cron.d/gost-restart`。上游那行写进 `/etc/crontab` 的
+  7 字段 + `?` 会被 cron 判定语法错误直接丢弃，但脚本照样提示「设置成功」。
+- 安装成功判定修正：上游检查的 unit 路径写成了 `systemctl`（应为 `systemd`），
+  再加上 `test -a` 链式判断的解析问题，实际无法确认 unit 是否装好。
+- 配置重建加保护：菜单 6/7/9 重建 `config.json` 前先备份，生成后做 JSON 校验，
+  失败自动回滚，并保留 `config.json.bak`。上游是直接删掉重写，写坏就起不来。
+- 更新不再原地覆写脚本：改为下载到临时文件、`bash -n` 校验后再原子替换，
+  并修复了多次更新后配置备份套娃、导致转发配置丢失的问题。
+- 不再从网络下载 systemd unit 与默认配置：改由脚本本地生成，只下载二进制，
+  且安装前先跑一次 `gost -V` 校验版本，拦截被篡改、截断或架构不符的文件。
+- 权限收紧：二进制 0755、unit 0644、`/etc/gost` 0700、配置 0600。
+  上游有 `chmod -R 777`，连 `/usr/lib/systemd/system` 都会被递归改成全局可写。
+- 输入校验：端口、主机、密码在读取时即校验，挡掉会破坏 JSON / URI / rawconf 的字符。
+- 菜单 9 的删除编号改为严格数字校验（上游只判断「含一个数字」，存在 sed 地址注入）。
+- 移除失效的国内镜像选项（原地址三个文件全部 404）。
+
+***
+## 文件说明
+
+| 文件 | 用途 |
+| --- | --- |
+| `gost.sh` | 一键脚本本体，安装后由它管理 gost |
+| `gost.service` | systemd unit，安装时写入 `/usr/lib/systemd/system/` |
+| `config.json` | gost 默认配置示例，安装时由脚本生成到 `/etc/gost/` |
+
+***
 ## 功能
 
-### 原脚本功能
-
-- 实现了systemd及gost配置文件对gost进行管理
-- 在不借助其他工具(如screen)的情况下实现多条转发规则同时生效
-- 机器reboot后转发不失效
+- 用 systemd 与 gost 配置文件管理 gost，reboot 后转发不失效
+- 不借助 screen 等工具即可让多条转发规则同时生效
 - 支持传输类型：
-  - tcp+udp不加密转发
-  -  relay+tls加密
+  - tcp + udp 不加密转发
+  - relay + tls
+  - relay + ws
+  - relay + wss
+- 落地机一键创建 ss / socks5 / http 代理（gost 内置）
+- 多落地简单型均衡负载（round / random / fifo）
+- 转发 CDN 自选节点
+- 自定义 TLS 证书：落地机可用 acme.sh 一键申请（HTTP 或 Cloudflare DNS），
+  中转机可开启证书校验
+- 定时重启任务（`/etc/cron.d/gost-restart`）
 
-### 此脚本新增功能
+***
+## 使用注意
 
-- 增加了传输类型选择功能
-- 新支持传输类型
-  - relay+ws
-  - relay+wss
-- 落地机一键创建ss/socks5/http代理 (gost内置)
-- 支持多传输类型的多落地简单型均衡负载
-- ~~增加gost国内加速下载镜像~~（被恶意刷流量导致我损失，不再提供）
-- 简单创建或删除gost定时重启任务
-- 脚本自动检查更新
-- 转发CDN自选节点ip
-- 支持自定义tls证书，落地可一键申请证书，中转可开启证书校验
+- 记得在安全组或防火墙放行你使用的端口，脚本不会自动改 ufw/firewalld。
+- 转发配置以 `/etc/gost/rawconf` 为准。菜单 6（重启）也会按 rawconf 重建 `config.json`，
+  手工改过的 `config.json` 会被覆盖——上一份会留在 `config.json.bak`。
+- 均衡负载的落地列表放在 `/root/<你起的名字>.txt`，改完用菜单 6 重启即可生效。
+- 菜单 3 卸载会停止并禁用服务、清理 `/etc/gost` 与定时任务，但不会删除 `gost.sh` 本身。
 
-## 功能展示
+***
+## 已知限制
 
-![iShot2020-12-14下午05.42.23.png](https://i.loli.net/2020/12/14/q75PO6s2DMIcUKB.png)
-
-![iShot2020-12-14下午05.42.39.png](https://i.loli.net/2020/12/14/vzpGlWmPtCrneOY.png)
-
-![2](https://i.loli.net/2020/10/16/fBHgwStVQxc821z.png)
-
-![3](https://i.loli.net/2020/10/16/xgZ6eVAwSzDUFjO.png)
-
-![4](https://i.loli.net/2020/10/16/lt6uAzI5X7yYWhr.png)
-
-![iShot2020-12-14下午05.43.46.png](https://i.loli.net/2020/12/14/YjiFTMCKs8lANbI.png)
-
-![iShot2020-12-14下午05.43.11.png](https://i.loli.net/2020/12/14/VIcQSsoUaqpzx5T.png)
+- gost v2 上游已停止维护，长期看应迁移到 v3（配置格式完全不同）。
+- 仅支持 systemd 与 Debian / Ubuntu / CentOS 系发行版。
+- `method()` 里仍有两份重复的配置生成分支，脚本内 43 处 `read` 未加 `-r`，
+  属风格问题，本轮保守修复未动。
