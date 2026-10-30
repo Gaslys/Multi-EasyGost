@@ -222,10 +222,14 @@ CONF
   fi
 }
 function Uninstall_ct() {
-  rm -rf /usr/bin/gost
-  rm -rf /usr/lib/systemd/system/gost.service
+  check_root
+  systemctl stop gost >/dev/null 2>&1
+  systemctl disable gost >/dev/null 2>&1
+  rm -f /usr/bin/gost
+  rm -f /usr/lib/systemd/system/gost.service
   rm -rf /etc/gost
-  rm -rf "$(pwd)"/gost.sh
+  rm -f "${cron_file}"
+  systemctl daemon-reload
   echo "gost已经成功删除"
 }
 function Start_ct() {
@@ -1025,6 +1029,7 @@ update_sh() {
   fi
 }
 
+check_root
 update_sh
 echo && echo -e "                 gost 一键安装配置脚本"${Red_font_prefix}[${shell_version}]${Font_color_suffix}"
   ----------- KANIKIG -----------
@@ -1049,7 +1054,7 @@ echo && echo -e "                 gost 一键安装配置脚本"${Red_font_prefi
  ${Green_font_prefix}10.${Font_color_suffix} gost定时重启配置
  ${Green_font_prefix}11.${Font_color_suffix} 自定义TLS证书配置
 ————————————" && echo
-read -e -p " 请输入数字 [1-9]:" num
+read -e -p " 请输入数字 [1-11]:" num
 case "$num" in
 1)
   Install_ct
@@ -1086,8 +1091,10 @@ case "$num" in
 9)
   show_all_conf
   read -p "请输入你要删除的配置编号：" numdelete
-  if echo $numdelete | grep -q '[0-9]'; then
-    sed -i "${numdelete}d" $raw_conf_path
+  count_line=$(awk 'END{print NR}' "${raw_conf_path}" 2>/dev/null)
+  # 原来只校验"含一个数字", "1e 命令" 这类输入能通过; GNU sed 的 e 地址修饰符会执行命令
+  if [[ ${numdelete} =~ ^[0-9]+$ ]] && ((10#${numdelete} >= 1 && 10#${numdelete} <= ${count_line:-0})); then
+    sed -i "${numdelete}d" "${raw_conf_path}"
     rm -rf /etc/gost/config.json
     confstart
     writeconf
@@ -1105,6 +1112,6 @@ case "$num" in
   cert
   ;;
 *)
-  echo "请输入正确数字 [1-9]"
+  echo "请输入正确数字 [1-11]"
   ;;
 esac
