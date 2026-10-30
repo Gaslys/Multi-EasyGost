@@ -992,24 +992,16 @@ function method() {
 
 function writeconf() {
   local trans_conf idx=0 total=0
-  # 先数一遍有效行: multiconflast 用 count_line 判断是否是最后一个对象(决定加不加逗号)
+  # 先数一遍可用规则: multiconflast 用 count_line 判断是否是最后一个对象(决定加不加逗号),
+  # 这里必须和下面写配置时用同一套 valid_rule_line, 否则统计多算一行就会多出一个逗号
   while IFS= read -r trans_conf || [[ -n ${trans_conf} ]]; do
-    trans_conf=${trans_conf%$'\r'}
-    [[ -z ${trans_conf//[[:space:]]/} ]] && continue
-    [[ ${trans_conf} != *"#"*"#"* ]] && continue
-    total=$((total + 1))
+    valid_rule_line "${trans_conf}" && total=$((total + 1))
   done <"${raw_conf_path}"
   count_line=${total}
   while IFS= read -r trans_conf || [[ -n ${trans_conf} ]]; do
     trans_conf=${trans_conf%$'\r'} # 兼容 Windows 换行, 否则 \r 会进到 JSON 字符串里
-    [[ -z ${trans_conf//[[:space:]]/} ]] && continue
-    if [[ ${trans_conf} != *"#"*"#"* ]]; then
-      warn "跳过无法解析的配置行: ${trans_conf}"
-      continue
-    fi
-    # 字段里的空格会让生成的 URI 变成 "tcp://: 10000/..." 这种, JSON 校验能过但 gost 解析失败
-    if [[ ${trans_conf} == *[[:space:]]* ]]; then
-      warn "跳过含空白的配置行: ${trans_conf}"
+    if ! valid_rule_line "${trans_conf}"; then
+      [[ -z ${trans_conf//[[:space:]]/} ]] || warn "跳过无法解析的配置行: ${trans_conf}"
       continue
     fi
     idx=$((idx + 1))
@@ -1042,6 +1034,12 @@ function show_all_conf() {
   count_line=$(awk 'END{print NR}' $raw_conf_path)
   for ((i = 1; i <= $count_line; i++)); do
     trans_conf=$(sed -n "${i}p" $raw_conf_path)
+    if ! valid_rule_line "${trans_conf}"; then
+      [[ -z ${trans_conf//[[:space:]]/} ]] && continue
+      echo -e " $i  |无法解析|  -  |${trans_conf}"
+      echo -e "--------------------------------------------------------"
+      continue
+    fi
     eachconf_retrieve
 
     if [ "$is_encrypt" == "nonencrypt" ]; then
@@ -1157,12 +1155,19 @@ function count_rules() {
     return
   }
   while IFS= read -r line || [[ -n ${line} ]]; do
-    line=${line%$'\r'}
-    [[ -z ${line//[[:space:]]/} ]] && continue
-    [[ ${line} != *"#"*"#"* ]] && continue
-    n=$((n + 1))
+    valid_rule_line "${line}" && n=$((n + 1))
   done <"${raw_conf_path}"
   echo "${n}"
+}
+
+# 判断一行是不是可用的规则: 生成(writeconf)、统计(count_rules)、查重(duplicate_ports)
+# 必须用同一套口径, 否则会出现"算进了统计却没写进配置"这种自相矛盾
+function valid_rule_line() {
+  local line="${1%$'\r'}"
+  [[ -z ${line//[[:space:]]/} ]] && return 1  # 空行
+  [[ ${line} != *"#"*"#"* ]] && return 1      # 字段不足
+  [[ ${line} == *[[:space:]]* ]] && return 1  # 含空白, 会生成 gost 无法解析的 URI
+  return 0
 }
 
 # 取一条 rawconf 规则实际占用的监听端口
@@ -1203,10 +1208,7 @@ function duplicate_ports() {
   local line
   [[ -f ${raw_conf_path} ]] || return 0
   while IFS= read -r line || [[ -n ${line} ]]; do
-    line=${line%$'\r'}
-    [[ -z ${line//[[:space:]]/} ]] && continue
-    [[ ${line} != *"#"*"#"* ]] && continue
-    [[ ${line} == *[[:space:]]* ]] && continue
+    valid_rule_line "${line}" || continue
     rule_listen_port "${line}"
   done <"${raw_conf_path}" | sort | uniq -d
 }
