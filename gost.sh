@@ -1,11 +1,21 @@
-#! /bin/bash
+#!/bin/bash
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-shell_version="1.1.1"
+Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
+shell_version="1.2.0"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
+
+function die() {
+  echo -e "${Error} $*" >&2
+  exit 1
+}
+function warn() {
+  echo -e "${Warn} $*" >&2
+}
+
 function checknew() {
   checknew=$(gost -V 2>&1 | awk '{print $2}')
   # check_new_ver
@@ -25,37 +35,69 @@ function checknew() {
 function check_sys() {
   if [[ -f /etc/redhat-release ]]; then
     release="centos"
-  elif cat /etc/issue | grep -q -E -i "debian"; then
+  elif grep -qi "debian" /etc/issue 2>/dev/null; then
     release="debian"
-  elif cat /etc/issue | grep -q -E -i "ubuntu"; then
+  elif grep -qi "ubuntu" /etc/issue 2>/dev/null; then
     release="ubuntu"
-  elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
+  elif grep -qiE "centos|red hat|redhat" /etc/issue 2>/dev/null; then
     release="centos"
-  elif cat /proc/version | grep -q -E -i "debian"; then
+  elif grep -qi "debian" /proc/version 2>/dev/null; then
     release="debian"
-  elif cat /proc/version | grep -q -E -i "ubuntu"; then
+  elif grep -qi "ubuntu" /proc/version 2>/dev/null; then
     release="ubuntu"
-  elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
+  elif grep -qiE "centos|red hat|redhat" /proc/version 2>/dev/null; then
     release="centos"
   fi
-  bit=$(uname -m)
-  if test "$bit" != "x86_64"; then
-    echo "请输入你的芯片架构，/386/armv5/armv6/armv7/armv8"
-    read bit
-  else
-    bit="amd64"
-  fi
+
+  # 常见架构直接自动识别，识别不出再让用户手选，避免 aarch64 机器被要求瞎猜
+  case "$(uname -m)" in
+  x86_64 | amd64) bit="amd64" ;;
+  i386 | i486 | i586 | i686) bit="386" ;;
+  aarch64 | arm64) bit="armv8" ;;
+  armv7l | armv7) bit="armv7" ;;
+  armv6l | armv6) bit="armv6" ;;
+  armv5l | armv5*) bit="armv5" ;;
+  *)
+    echo "无法识别当前架构 $(uname -m)，请输入芯片架构，/386/armv5/armv6/armv7/armv8"
+    read -r bit
+    case "${bit}" in
+    386 | armv5 | armv6 | armv7 | armv8 | amd64) ;;
+    *) die "不支持的架构: ${bit}" ;;
+    esac
+    ;;
+  esac
 }
+function download() {
+  local url="$1" dest="$2"
+  if command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 --timeout=20 -O "${dest}" "${url}" && return 0
+    warn "TLS 校验失败，回退为不校验证书重试一次（请自行确认下载源可信）"
+    wget -q --no-check-certificate --tries=3 --timeout=20 -O "${dest}" "${url}" && return 0
+    return 1
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --connect-timeout 10 --max-time 180 -o "${dest}" "${url}" && return 0
+    warn "TLS 校验失败，回退为不校验证书重试一次（请自行确认下载源可信）"
+    curl -fsSLk --retry 3 --connect-timeout 10 --max-time 180 -o "${dest}" "${url}"
+    return $?
+  fi
+  return 1
+}
+
 function Installation_dependency() {
-  gzip_ver=$(gzip -V)
-  if [[ -z ${gzip_ver} ]]; then
-    if [[ ${release} == "centos" ]]; then
-      yum update
-      yum install -y gzip wget
-    else
-      apt-get update
-      apt-get install -y gzip wget
-    fi
+  local pkgs=""
+  command -v wget >/dev/null 2>&1 || pkgs="${pkgs} wget"
+  command -v gzip >/dev/null 2>&1 || pkgs="${pkgs} gzip"
+  [[ -z ${pkgs} ]] && return 0
+  echo -e "${Info} 缺少依赖:${pkgs}，正在安装 ..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y ${pkgs} || die "依赖安装失败，请手动安装:${pkgs}"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ${pkgs} || die "依赖安装失败，请手动安装:${pkgs}"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ${pkgs} || die "依赖安装失败，请手动安装:${pkgs}"
+  else
+    die "未找到可用的包管理器，请手动安装:${pkgs}"
   fi
 }
 function check_root() {
@@ -72,18 +114,14 @@ function check_new_ver() {
   fi
 }
 function check_file() {
-  if test ! -d "/usr/lib/systemd/system/"; then
-    mkdir /usr/lib/systemd/system
-    chmod -R 777 /usr/lib/systemd/system
+  if [[ ! -d /usr/lib/systemd/system ]]; then
+    mkdir -p /usr/lib/systemd/system || die "无法创建 /usr/lib/systemd/system，当前系统可能没有 systemd"
   fi
 }
 function check_nor_file() {
-  rm -rf "$(pwd)"/gost
-  rm -rf "$(pwd)"/gost.service
-  rm -rf "$(pwd)"/config.json
+  rm -f /usr/bin/gost
+  rm -f /usr/lib/systemd/system/gost.service
   rm -rf /etc/gost
-  rm -rf /usr/lib/systemd/system/gost.service
-  rm -rf /usr/bin/gost
 }
 function Install_ct() {
   check_root
@@ -91,43 +129,78 @@ function Install_ct() {
   Installation_dependency
   check_file
   check_sys
-  # check_new_ver
+
+  local bin_url tmpdir
   echo -e "若为国内机器建议使用大陆镜像加速下载"
   read -e -p "是否使用？[y/n]:" addyn
   [[ -z ${addyn} ]] && addyn="n"
   if [[ ${addyn} == [Yy] ]]; then
-    rm -rf gost-linux-"$bit"-"$ct_new_ver".gz
-    wget --no-check-certificate https://gotunnel.oss-cn-shenzhen.aliyuncs.com/gost-linux-"$bit"-"$ct_new_ver".gz
-    gunzip gost-linux-"$bit"-"$ct_new_ver".gz
-    mv gost-linux-"$bit"-"$ct_new_ver" gost
-    mv gost /usr/bin/gost
-    chmod -R 777 /usr/bin/gost
-    wget --no-check-certificate https://gotunnel.oss-cn-shenzhen.aliyuncs.com/gost.service && chmod -R 777 gost.service && mv gost.service /usr/lib/systemd/system
-    mkdir /etc/gost && wget --no-check-certificate https://gotunnel.oss-cn-shenzhen.aliyuncs.com/config.json && mv config.json /etc/gost && chmod -R 777 /etc/gost
+    bin_url="https://gotunnel.oss-cn-shenzhen.aliyuncs.com/gost-linux-${bit}-${ct_new_ver}.gz"
   else
-    rm -rf gost-linux-"$bit"-"$ct_new_ver".gz
-    wget --no-check-certificate https://github.com/ginuerzh/gost/releases/download/v"$ct_new_ver"/gost-linux-"$bit"-"$ct_new_ver".gz
-    gunzip gost-linux-"$bit"-"$ct_new_ver".gz
-    mv gost-linux-"$bit"-"$ct_new_ver" gost
-    mv gost /usr/bin/gost
-    chmod -R 777 /usr/bin/gost
-    wget --no-check-certificate https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.service && chmod -R 777 gost.service && mv gost.service /usr/lib/systemd/system
-    mkdir /etc/gost && wget --no-check-certificate https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/config.json && mv config.json /etc/gost && chmod -R 777 /etc/gost
+    bin_url="https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${bit}-${ct_new_ver}.gz"
   fi
 
-  systemctl enable gost && systemctl restart gost
+  tmpdir=$(mktemp -d "${HOME:-/root}/.gost-install.XXXXXX") || die "无法创建临时目录"
+  echo -e "${Info} 正在下载 gost v${ct_new_ver} (${bit}) ..."
+  if ! download "${bin_url}" "${tmpdir}/gost.gz"; then
+    rm -rf "${tmpdir}"
+    die "gost 下载失败，请检查网络连接或更换下载源"
+  fi
+  if ! gunzip -f "${tmpdir}/gost.gz"; then
+    rm -rf "${tmpdir}"
+    die "gost 解压失败，下载内容可能已损坏"
+  fi
+  chmod 0755 "${tmpdir}/gost"
+  # 装之前先跑一下：能执行且版本号正确，才说明这是完整、未篡改、架构匹配的二进制
+  if ! "${tmpdir}/gost" -V 2>&1 | grep -qF "${ct_new_ver}"; then
+    rm -rf "${tmpdir}"
+    die "下载的 gost 无法运行或版本不符（可能被篡改、不完整，或架构选择错误），已中止安装"
+  fi
+
+  # systemd unit 与默认配置改为脚本本地生成，不再从网络下载，
+  # 避免 unit 文件被中间人替换后以 root 身份执行
+  cat >"${tmpdir}/gost.service" <<'UNIT'
+[Unit]
+Description=gost
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+ExecStart=/usr/bin/gost -C /etc/gost/config.json
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  cat >"${tmpdir}/config.json" <<'CONF'
+{
+    "Debug": true,
+    "Retries": 0,
+    "ServeNodes": [
+        "udp://127.0.0.1:65532"
+    ]
+}
+CONF
+
+  install -m 0755 "${tmpdir}/gost" /usr/bin/gost || { rm -rf "${tmpdir}"; die "安装 gost 二进制失败"; }
+  install -m 0644 "${tmpdir}/gost.service" /usr/lib/systemd/system/gost.service || { rm -rf "${tmpdir}"; die "安装 service 文件失败"; }
+  mkdir -p /etc/gost && chmod 0700 /etc/gost
+  install -m 0644 "${tmpdir}/config.json" /etc/gost/config.json || { rm -rf "${tmpdir}"; die "安装默认配置失败"; }
+  rm -rf "${tmpdir}"
+
+  systemctl daemon-reload
+  systemctl enable gost >/dev/null 2>&1
+  systemctl restart gost
+  sleep 1
   echo "------------------------------"
-  if test -a /usr/bin/gost -a /usr/lib/systemctl/gost.service -a /etc/gost/config.json; then
+  if [[ -x /usr/bin/gost && -f /usr/lib/systemd/system/gost.service && -f /etc/gost/config.json ]] && systemctl is-active --quiet gost; then
     echo "gost安装成功"
-    rm -rf "$(pwd)"/gost
-    rm -rf "$(pwd)"/gost.service
-    rm -rf "$(pwd)"/config.json
   else
-    echo "gost没有安装成功"
-    rm -rf "$(pwd)"/gost
-    rm -rf "$(pwd)"/gost.service
-    rm -rf "$(pwd)"/config.json
-    rm -rf "$(pwd)"/gost.sh
+    echo "gost没有安装成功，请执行 systemctl status gost 及 journalctl -u gost -n 50 查看原因"
   fi
 }
 function Uninstall_ct() {
