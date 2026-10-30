@@ -1116,9 +1116,9 @@ update_sh() {
         fi
         # 先确认下到的是脚本而不是错误页，再原子替换。
         # 原来是 wget -N 原地覆写正在执行的脚本, bash 边读边执行, 可能读到半截文件
-        if ! grep -q "^shell_version=" "$tmp"; then
+        if ! bash -n "$tmp" 2>/dev/null || ! grep -q "^shell_version=\"${ol_version}\"" "$tmp"; then
           rm -f "$tmp"
-          warn "下载内容不是有效脚本，已保留当前脚本"
+          warn "下载内容不是有效脚本或版本不符，已保留当前脚本"
           return 1
         fi
         chmod 0755 "$tmp"
