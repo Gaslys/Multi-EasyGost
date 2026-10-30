@@ -1131,7 +1131,7 @@ function show_banner() {
   echo
   echo -e "    ${Green_font_prefix}1${Font_color_suffix} 安装      ${Green_font_prefix}2${Font_color_suffix} 更新      ${Green_font_prefix}3${Font_color_suffix} 卸载      ${Green_font_prefix}4${Font_color_suffix} 启动"
   echo -e "    ${Green_font_prefix}5${Font_color_suffix} 停止      ${Green_font_prefix}6${Font_color_suffix} 重启      ${Green_font_prefix}7${Font_color_suffix} 新增      ${Green_font_prefix}8${Font_color_suffix} 查看"
-  echo -e "    ${Green_font_prefix}9${Font_color_suffix} 删除      ${Green_font_prefix}10${Font_color_suffix} 定时重启 ${Green_font_prefix}11${Font_color_suffix} 证书"
+  echo -e "    ${Green_font_prefix}9${Font_color_suffix} 删除      ${Green_font_prefix}10${Font_color_suffix} 定时重启 ${Green_font_prefix}11${Font_color_suffix} 证书     ${Cyan_font_prefix}0${Font_color_suffix} 退出"
   echo -e "  ------------------------------------------------------------"
   echo
 }
@@ -1186,7 +1186,7 @@ update_sh() {
 check_root
 show_banner
 update_sh
-read -e -p " 请输入数字 [1-11]:" num
+read -e -p " 请输入数字 [0-11]:" num
 case "$num" in
 1)
   Install_ct
@@ -1247,7 +1247,10 @@ case "$num" in
 11)
   cert
   ;;
+0)
+  exit 0
+  ;;
 *)
-  echo "  请输入正确数字 [1-11]"
+  echo "  请输入正确数字 [0-11]"
   ;;
 esac
