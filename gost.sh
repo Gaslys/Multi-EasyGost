@@ -10,6 +10,8 @@ raw_conf_path="/etc/gost/rawconf"
 # 自用 fork: 自检更新指向自己的仓库, 避免更新时把自己修的版本降级回上游
 update_url="https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost.sh"
 cron_file="/etc/cron.d/gost-restart"
+# 均衡负载的落地列表必须放在 gost 进程(User=root)可读的位置, 且与配置里写的路径一致
+peer_dir="/root"
 
 function die() {
   echo -e "${Error} $*" >&2
@@ -346,7 +348,15 @@ function read_d_ip() {
     echo -e "------------------------------------------------------------------"
     echo -e "请输入落地列表文件名"
     read -e -p "自定义但不同配置应不重复，不用输入后缀，例如ips1、iplist2: " flag_c
-    touch $flag_c.txt
+    [[ ${flag_c} =~ ^[A-Za-z0-9_-]+$ ]] || die "文件名只能包含字母、数字、下划线和连字符"
+    # 原来 touch 在当前工作目录建文件, 但生成的配置里写死 /root/xxx.txt:
+    # 只要不是从 /root 运行脚本, 落地列表就建错地方, 均衡负载静默失效
+    local peer_file="${peer_dir}/${flag_c}.txt"
+    if [[ -f ${peer_file} ]]; then
+      read -e -p "${peer_file} 已存在，是否覆盖？[y/N]:" overwrite
+      [[ ${overwrite} == [Yy] ]] || die "已取消，可先编辑 ${peer_file} 后再用菜单 6 重启生效"
+    fi
+    mkdir -p "${peer_dir}" && : >"${peer_file}" || die "无法写入 ${peer_file}"
     echo -e "------------------------------------------------------------------"
     echo -e "请依次输入你要均衡负载的落地ip与端口"
     while true; do
@@ -354,12 +364,12 @@ function read_d_ip() {
       read -p "请输入: " peer_ip
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向${peer_ip}的哪个端口?"
       read -p "请输入: " peer_port
-      echo -e "$peer_ip:$peer_port" >>$flag_c.txt
+      echo -e "$peer_ip:$peer_port" >>"${peer_file}"
       read -e -p "是否继续添加落地？[Y/n]:" addyn
       [[ -z ${addyn} ]] && addyn="y"
       if [[ ${addyn} == [Nn] ]]; then
         echo -e "------------------------------------------------------------------"
-        echo -e "已在root目录创建$flag_c.txt，您可以随时编辑该文件修改落地信息，重启gost即可生效"
+        echo -e "已创建 ${peer_file}，您可以随时编辑该文件修改落地信息，重启gost即可生效"
         echo -e "------------------------------------------------------------------"
         break
       else
@@ -687,8 +697,8 @@ function method() {
       echo "        \"tcp://:$s_port/$d_ip?host=$d_port\",
         \"udp://:$s_port/$d_ip?host=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerno" ]; then
-      echo "        \"tcp://:$s_port?ip=/root/$d_ip.txt&strategy=$d_port\",
-        \"udp://:$s_port?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+      echo "        \"tcp://:$s_port?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\",
+        \"udp://:$s_port?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "encrypttls" ]; then
       echo "        \"tcp://:$s_port\",
         \"udp://:$s_port\"
@@ -712,19 +722,19 @@ function method() {
     	\"udp://:$s_port\"
 	],
 	\"ChainNodes\": [
-    	\"relay+tls://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+    	\"relay+tls://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerws" ]; then
       echo "        \"tcp://:$s_port\",
     	\"udp://:$s_port\"
 	],
 	\"ChainNodes\": [
-    	\"relay+ws://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+    	\"relay+ws://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerwss" ]; then
       echo "        \"tcp://:$s_port\",
     	\"udp://:$s_port\"
 	],
 	\"ChainNodes\": [
-    	\"relay+wss://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+    	\"relay+wss://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "cdnws" ]; then
       echo "        \"tcp://:$s_port\",
     	\"udp://:$s_port\"
@@ -765,8 +775,8 @@ function method() {
       echo "                \"tcp://:$s_port/$d_ip:$d_port\",
                 \"udp://:$s_port/$d_ip:$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerno" ]; then
-      echo "                \"tcp://:$s_port?ip=/root/$d_ip.txt&strategy=$d_port\",
-                \"udp://:$s_port?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+      echo "                \"tcp://:$s_port?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\",
+                \"udp://:$s_port?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "cdnno" ]; then
       echo "                \"tcp://:$s_port/$d_ip?host=$d_port\",
                 \"udp://:$s_port/$d_ip?host=$d_port\"" >>$gost_conf_path
@@ -793,19 +803,19 @@ function method() {
                 \"udp://:$s_port\"
             ],
             \"ChainNodes\": [
-                \"relay+tls://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+                \"relay+tls://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerws" ]; then
       echo "                \"tcp://:$s_port\",
                 \"udp://:$s_port\"
             ],
             \"ChainNodes\": [
-                \"relay+ws://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+                \"relay+ws://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "peerwss" ]; then
       echo "                \"tcp://:$s_port\",
                 \"udp://:$s_port\"
             ],
             \"ChainNodes\": [
-                \"relay+wss://:?ip=/root/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
+                \"relay+wss://:?ip=${peer_dir}/$d_ip.txt&strategy=$d_port\"" >>$gost_conf_path
     elif [ "$is_encrypt" == "cdnws" ]; then
       echo "                \"tcp://:$s_port\",
                 \"udp://:$s_port\"
