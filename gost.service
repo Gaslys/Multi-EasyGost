@@ -1,14 +1,14 @@
 [Unit]
 Description=gost
 After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 Restart=always
 RestartSec=5
-DynamicUser=true
+LimitNOFILE=65535
 ExecStart=/usr/bin/gost -C /etc/gost/config.json
 
 [Install]
