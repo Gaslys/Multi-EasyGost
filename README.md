@@ -1,7 +1,7 @@
 # Multi-EasyGost 一键脚本使用指南
 
 > 本仓库是 [KANIKIG/Multi-EasyGost](https://github.com/KANIKIG/Multi-EasyGost) 的个人 fork（分支 `v2`）。
-> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.8**，gost 固定 **v2.11.2**。
+> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.9**，gost 固定 **v2.11.2**。
 > 逐条改动与验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ***
@@ -99,6 +99,7 @@ curl -fsSL -o gost-lite.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGo
 ## 使用注意
 
 - 记得在安全组或防火墙放行你使用的端口，脚本不会自动改 ufw/firewalld。
+- 目标地址支持 IPv4、域名和 IPv6 字面量（IPv6 会自动加方括号）；地址里不要带端口，端口单独填。
 - 转发配置以 `/etc/gost/rawconf` 为准。菜单 6（重启）也会按 rawconf 重建 `config.json`，
   手工改过的 `config.json` 会被覆盖——上一份会留在 `config.json.bak`。
 - 均衡负载的落地列表放在 `/root/<你起的名字>.txt`，改完用菜单 6 重启即可生效。

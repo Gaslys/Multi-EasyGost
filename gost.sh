@@ -5,7 +5,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.2.8"
+shell_version="1.2.9"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -117,6 +117,24 @@ function valid_host() {
   [[ ${v} != *[[:space:]]* && ${v} != *'"'* && ${v} != *\\* && ${v} != *'#'* && ${v} != *'@'* && ${v} != */* && ${v} != *'?'* && ${v} != *'%'* ]] ||
     die "${label}不能包含空格、引号、反斜杠、#、@、/、?、%"
 }
+# 主机拼进 URI/配置前的统一处理: IPv6 字面量要加方括号, 否则 "地址:端口" 会有歧义
+# 顺带挡掉"把 IP:端口 填进地址栏"这种常见错误(冒号只有一个且不是 IPv6)
+function uri_host() {
+  local h="$1" colons
+  [[ ${h} == \[*\] ]] && {
+    printf '%s' "${h}"
+    return 0
+  }
+  [[ ${h} != *:* ]] && {
+    printf '%s' "${h}"
+    return 0
+  }
+  [[ ${h} =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+  colons=${h//[^:]/}
+  (( ${#colons} >= 2 )) || return 1
+  printf '[%s]' "${h}"
+}
+
 function valid_port() {
   local v="$1" label="$2"
   [[ ${v} =~ ^[0-9]+$ ]] && ((10#${v} >= 1 && 10#${v} <= 65535)) || die "${label}必须是 1-65535 的数字"
@@ -577,6 +595,7 @@ function read_d_ip() {
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向的IP或域名?"
       read -r -p "请输入: " peer_ip
       valid_host "${peer_ip}" "落地IP或域名"
+      peer_ip=$(uri_host "${peer_ip}") || die "落地地址格式不对：带冒号的只支持 IPv6 地址，端口在下一步单独填"
       echo -e "请问你要将本机从${flag_b}接收到的流量转发向${peer_ip}的哪个端口?"
       read -r -p "请输入: " peer_port
       valid_port "${peer_port}" "落地端口"
@@ -600,6 +619,7 @@ function read_d_ip() {
     echo -e "将本机从${flag_b}接收到的流量转发向的自选ip:"
     read -r -p "请输入: " flag_c
     valid_host "${flag_c}" "自选IP"
+    flag_c=$(uri_host "${flag_c}") || die "自选IP 格式不对：带冒号的只支持 IPv6 地址，端口在下一步单独填"
     echo -e "请问你要将本机从${flag_b}接收到的流量转发向${flag_c}的哪个端口?"
     echo -e "[1] 80"
     echo -e "[2] 443"
@@ -628,6 +648,7 @@ function read_d_ip() {
     fi
     read -r -p "请输入: " flag_c
     valid_host "${flag_c}" "目的地IP或域名"
+    flag_c=$(uri_host "${flag_c}") || die "目的地地址格式不对：带冒号的只支持 IPv6 地址，端口在下一步单独填"
   fi
 }
 function read_d_port() {

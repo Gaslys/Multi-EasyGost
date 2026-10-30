@@ -7,7 +7,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.0.1"
+shell_version="1.0.2"
 ct_new_ver="2.11.2"
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -217,6 +217,24 @@ function Uninstall_ct() {
   rm -f "${cron_file}"
   systemctl daemon-reload
   echo "gost已经成功删除"
+}
+
+# 主机拼进 URI/配置前的统一处理: IPv6 字面量要加方括号, 否则 "地址:端口" 会有歧义
+# 顺带挡掉"把 IP:端口 填进地址栏"这种常见错误(冒号只有一个且不是 IPv6)
+function uri_host() {
+  local h="$1" colons
+  [[ ${h} == \[*\] ]] && {
+    printf '%s' "${h}"
+    return 0
+  }
+  [[ ${h} != *:* ]] && {
+    printf '%s' "${h}"
+    return 0
+  }
+  [[ ${h} =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+  colons=${h//[^:]/}
+  (( ${#colons} >= 2 )) || return 1
+  printf '[%s]' "${h}"
 }
 
 function valid_port() {
@@ -461,6 +479,7 @@ function add_rule() {
   echo -e "流量转发到哪个 IP 或域名（落地机地址，也可以是 127.0.0.1）"
   read -r -p "请输入: " ip
   valid_host "${ip}" "目标IP或域名"
+  ip=$(uri_host "${ip}") || die "目标地址格式不对：带冒号的只支持 IPv6 地址，端口在下一步单独填"
   echo -e "------------------------------------------------------------------"
   read -r -p "转发到${ip}的哪个端口: " dport
   valid_port "${dport}" "目标端口"
