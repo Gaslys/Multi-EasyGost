@@ -1,7 +1,7 @@
 # Multi-EasyGost 一键脚本使用指南
 
 > 本仓库是 [KANIKIG/Multi-EasyGost](https://github.com/KANIKIG/Multi-EasyGost) 的个人 fork（分支 `v2`）。
-> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.4**，gost 固定 **v2.11.2**。
+> 菜单、配置格式与上游保持一致，只修 bug 与安全加固：当前脚本版本 **1.2.5**，gost 固定 **v2.11.2**。
 > 逐条改动与验证记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ***
