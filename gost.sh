@@ -218,14 +218,9 @@ function Install_ct() {
   check_sys
 
   local bin_url tmpdir
-  echo -e "若为国内机器建议使用大陆镜像加速下载"
-  read -e -p "是否使用？[y/n]:" addyn
-  [[ -z ${addyn} ]] && addyn="n"
-  if [[ ${addyn} == [Yy] ]]; then
-    bin_url="https://gotunnel.oss-cn-shenzhen.aliyuncs.com/gost-linux-${bit}-${ct_new_ver}.gz"
-  else
-    bin_url="https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${bit}-${ct_new_ver}.gz"
-  fi
+  # 原来的国内镜像(gotunnel.oss-cn-shenzhen.aliyuncs.com)已失效, 三个文件全部 404,
+  # 选"是"只会白等一次失败, 因此移除该选项, 统一从 GitHub Releases 下载
+  bin_url="https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${bit}-${ct_new_ver}.gz"
 
   tmpdir=$(mktemp -d "${HOME:-/root}/.gost-install.XXXXXX") || die "无法创建临时目录"
   echo -e "${Info} 正在下载 gost v${ct_new_ver} (${bit}) ..."
