@@ -40,9 +40,23 @@ function json_ok() {
 function regen_config() {
   local bak
   [[ -d /etc/gost ]] || die "gost 尚未安装或配置文件目录不存在，请先执行菜单 1 安装"
-  if [[ ! -s ${raw_conf_path} ]]; then
+  if [[ ! -f ${raw_conf_path} ]]; then
     warn "未找到转发配置 ${raw_conf_path}，跳过重建，仅重启服务"
     return 0
+  fi
+  # 规则被删光时不能写空配置: gost 对 "ServeNodes": [] 直接报 invalid config 退出,
+  # 保留旧配置又会让刚删掉的规则继续生效, 所以这里直接把服务停掉
+  if (( $(count_rules) == 0 )); then
+    systemctl stop gost >/dev/null 2>&1
+    echo -e "${Info} 已没有可用的转发规则，gost 服务已停止（无规则时 gost 无法启动）"
+    return 0
+  fi
+  local dup
+  dup=$(duplicate_ports)
+  if [[ -n ${dup} ]]; then
+    warn "以下监听端口在多条规则里重复，gost 会因 address already in use 起不来：$(echo "${dup}" | tr '\n' ' ')"
+    warn "已保留当前配置未覆盖，请用菜单 9 删除冲突规则后重试"
+    return 1
   fi
   bak=$(mktemp) || die "无法创建临时文件"
   if [[ -f ${gost_conf_path} ]]; then
@@ -299,12 +313,24 @@ function Uninstall_ct() {
   echo "gost已经成功删除"
 }
 function Start_ct() {
-  systemctl start gost
-  echo "已启动"
+  if ! systemctl start gost 2>/dev/null; then
+    warn "启动失败，gost 可能尚未安装，请先执行菜单 1"
+    return 1
+  fi
+  sleep 1
+  if systemctl is-active --quiet gost; then
+    echo "已启动"
+  else
+    warn "gost 未能启动，请执行 systemctl status gost 及 journalctl -u gost -n 50 查看原因"
+  fi
 }
 function Stop_ct() {
-  systemctl stop gost
-  echo "已停止"
+  systemctl stop gost 2>/dev/null
+  if systemctl is-active --quiet gost; then
+    warn "gost 仍未停止，请执行 systemctl status gost 查看原因"
+  else
+    echo "已停止"
+  fi
 }
 function Restart_ct() {
   regen_config || warn "配置重建失败，已回滚到上一份配置，继续以旧配置重启"
@@ -373,6 +399,7 @@ function read_s_port() {
     echo -e "请问你要将本机哪个端口接收到的流量进行转发?"
     read -p "请输入: " flag_b
     valid_port "${flag_b}" "本地监听端口"
+    listen_port_taken "${flag_b}" && die "端口 ${flag_b} 已被现有规则占用，请换一个（多条规则不能监听同一端口）"
   fi
 }
 function read_d_ip() {
@@ -488,16 +515,19 @@ function read_d_port() {
     echo -e "请问你要设置ss代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "ss代理端口"
+    listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "socks" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置socks代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "socks代理端口"
+    listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [ "$flag_a" == "http" ]; then
     echo -e "------------------------------------------------------------------"
     echo -e "请问你要设置http代理服务的端口?"
     read -p "请输入: " flag_d
     valid_port "${flag_d}" "http代理端口"
+    listen_port_taken "${flag_d}" && die "端口 ${flag_d} 已被现有规则占用，请换一个"
   elif [[ "$flag_a" == "peer"* ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "您要设置的均衡负载策略: "
@@ -1105,6 +1135,46 @@ function count_rules() {
     n=$((n + 1))
   done <"${raw_conf_path}"
   echo "${n}"
+}
+
+# 取一条 rawconf 规则实际占用的监听端口
+# ss/socks/http 的第二个字段存的是密码, 监听端口在第三段
+function rule_listen_port() {
+  local line="$1" t f1 rest f3 sp
+  t=${line%%/*}
+  f1=${line%%#*}
+  sp=${f1#*/}
+  rest=${line#*#}
+  f3=${rest#*#}
+  case "${t}" in
+  ss | socks | http) echo "${f3}" ;;
+  *) echo "${sp}" ;;
+  esac
+}
+
+# 该监听端口是否已被现有规则占用
+function listen_port_taken() {
+  local port="$1" line
+  [[ -f ${raw_conf_path} ]] || return 1
+  while IFS= read -r line || [[ -n ${line} ]]; do
+    line=${line%$'\r'}
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    [[ ${line} != *"#"*"#"* ]] && continue
+    [[ $(rule_listen_port "${line}") == "${port}" ]] && return 0
+  done <"${raw_conf_path}"
+  return 1
+}
+
+# 列出 rawconf 里重复的监听端口(gost 会因 address already in use 起不来)
+function duplicate_ports() {
+  local line
+  [[ -f ${raw_conf_path} ]] || return 0
+  while IFS= read -r line || [[ -n ${line} ]]; do
+    line=${line%$'\r'}
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    [[ ${line} != *"#"*"#"* ]] && continue
+    rule_listen_port "${line}"
+  done <"${raw_conf_path}" | sort | uniq -d
 }
 
 function show_banner() {
