@@ -1027,7 +1027,9 @@ function show_all_conf() {
       str=""
     fi
 
-    if [[ ${is_encrypt} == "ss" || ${is_encrypt} == "socks" || ${is_encrypt} == "http" ]]; then
+    if [[ ${is_encrypt} == "cdnno" || ${is_encrypt} == "cdnws" || ${is_encrypt} == "cdnwss" ]]; then
+      echo -e " $i  |$str  |$s_port\t|$d_ip host=$d_port"
+    elif [[ ${is_encrypt} == "ss" || ${is_encrypt} == "socks" || ${is_encrypt} == "http" ]]; then
       # 这三类里 s_port 存的是密码、d_ip 存的是加密方式/用户名, 原表格会把密码当端口打印
       echo -e " $i  |$str  |$d_port\t|$d_ip (密码已隐藏)"
     else
