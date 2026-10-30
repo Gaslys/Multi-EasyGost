@@ -5,7 +5,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.2.7"
+shell_version="1.2.8"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -89,6 +89,10 @@ function regen_config() {
   chmod 0600 "${tmpcfg}"
   if [[ -f ${target} ]]; then
     cp -a "${target}" "${target}.bak" 2>/dev/null && chmod 0600 "${target}.bak" 2>/dev/null
+  else
+    # 没有"上一份配置"时清掉旧 .bak: 否则这次重启失败会回滚到一份无关的旧配置,
+    # 比如刚删光的规则被复活
+    rm -f "${target}.bak"
   fi
   if ! mv -f "${tmpcfg}" "${target}"; then
     warn "替换配置失败，已保留上一份配置"
@@ -408,6 +412,8 @@ function restart_gost() {
       warn "已回滚，本次改动未生效；请检查端口是否被其它程序占用后重试"
       return 1
     fi
+  else
+    warn "没有可回滚的上一份配置（${bak} 不存在）"
   fi
   warn "gost 仍未启动，请执行 systemctl status gost 及 journalctl -u gost -n 50 查看原因"
   return 1

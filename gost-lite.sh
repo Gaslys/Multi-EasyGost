@@ -7,7 +7,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.0.0"
+shell_version="1.0.1"
 ct_new_ver="2.11.2"
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -40,13 +40,6 @@ function check_root() {
 }
 
 function check_sys() {
-  if [[ -f /etc/redhat-release ]]; then
-    release="centos"
-  elif grep -qi "debian" /etc/issue 2>/dev/null; then
-    release="debian"
-  elif grep -qi "ubuntu" /etc/issue 2>/dev/null; then
-    release="ubuntu"
-  fi
   case "$(uname -m)" in
   x86_64 | amd64) bit="amd64" ;;
   i386 | i486 | i586 | i686) bit="386" ;;
@@ -244,7 +237,11 @@ function parse_rule() {
   [[ -z ${line//[[:space:]]/} ]] && return 1
   IFS='#' read -r f1 host dport extra <<<"${line}"
   r_type=${f1%%/*}
-  [[ ${r_type} == "nonencrypt" ]] || return 2
+  if [[ ${r_type} != "nonencrypt" ]]; then
+    # 只有形如 ss/xxx#...#... 的才算完整版的规则, 其余一律当坏行
+    [[ ${line} == *"#"*"#"* ]] && return 2
+    return 1
+  fi
   [[ -n ${extra} ]] && return 1
   r_sport=${f1#*/}
   r_dhost=${host}
@@ -269,15 +266,19 @@ function count_rules() {
   echo "${n}"
 }
 
-# 精简版只认 nonencrypt; rawconf 里混有完整版的 ss/tls 规则时拒绝重建, 否则会把它们写丢
-function ensure_lite() {
-  local line foreign=0
-  [[ -f ${raw_conf_path} ]] || return 0
+# rawconf 里有没有完整版写的 ss/tls/ws 等规则
+function has_foreign_rules() {
+  local line
+  [[ -f ${raw_conf_path} ]] || return 1
   while IFS= read -r line || [[ -n ${line} ]]; do
     parse_rule "${line}"
-    (($? == 2)) && foreign=1
+    (($? == 2)) && return 0
   done <"${raw_conf_path}"
-  if ((foreign)); then
+  return 1
+}
+# 精简版只认 nonencrypt; 混有其它类型时拒绝重建, 否则会把它们写丢
+function ensure_lite() {
+  if has_foreign_rules; then
     warn "检测到 ${raw_conf_path} 里还有精简版不支持的规则类型（ss / tls / ws 等）"
     warn "为了不把它们的配置写丢，这里不重建配置；请改用完整版 gost.sh 管理这台机器"
     return 1
@@ -287,7 +288,7 @@ function ensure_lite() {
 
 # 由 rawconf 重建 config.json: 写临时文件, 校验通过后原子替换
 function rebuild_config() {
-  local target="${gost_conf_path}" tmp line n=0
+  local target="${gost_conf_path}" tmp line n=0 lineno=0 dup=0 seen=" " p
   local -a sports dests
   ensure_lite || return 1
   if [[ ! -f ${raw_conf_path} ]]; then
@@ -295,11 +296,32 @@ function rebuild_config() {
     return 1
   fi
   while IFS= read -r line || [[ -n ${line} ]]; do
-    parse_rule "${line}" || continue
-    sports+=("$((10#${r_sport}))")
+    lineno=$((lineno + 1))
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    parse_rule "${line}"
+    case $? in
+    0) ;;
+    2)
+      warn "第 ${lineno} 行是其它类型的规则（${r_type}），精简版不处理，已跳过"
+      continue
+      ;;
+    *)
+      warn "第 ${lineno} 行无法解析，已跳过（格式应为 nonencrypt/本地端口#目标IP#目标端口）"
+      continue
+      ;;
+    esac
+    p=$((10#${r_sport}))
+    if [[ ${seen} == *" ${p} "* ]]; then
+      warn "本地端口 ${p} 在 rawconf 里出现了不止一次，gost 会因端口冲突起不来，已中止"
+      dup=1
+      continue
+    fi
+    seen+="${p} "
+    sports+=("${p}")
     dests+=("${r_dhost}:$((10#${r_dport}))")
     n=$((n + 1))
   done <"${raw_conf_path}"
+  ((dup)) && return 1
   if ((n == 0)); then
     warn "没有可用的转发规则"
     return 1
@@ -334,6 +356,10 @@ function rebuild_config() {
   chmod 0600 "${tmp}"
   if [[ -f ${target} ]]; then
     cp -a "${target}" "${target}.bak" 2>/dev/null && chmod 0600 "${target}.bak" 2>/dev/null
+  else
+    # 没有"上一份配置"时清掉旧 .bak: 否则这次重启失败会回滚到一份无关的旧配置,
+    # 比如刚删光的规则被复活
+    rm -f "${target}.bak"
   fi
   if ! mv -f "${tmp}" "${target}"; then
     warn "替换配置失败，已保留上一份配置"
@@ -361,6 +387,8 @@ function restart_gost() {
       warn "已回滚，本次改动未生效；请检查端口是否被其它程序占用后重试"
       return 1
     fi
+  else
+    warn "没有可回滚的上一份配置（${bak} 不存在）"
   fi
   warn "gost 仍未启动，请执行 systemctl status gost 及 journalctl -u gost -n 50 查看原因"
   return 1
@@ -413,8 +441,8 @@ function list_rules() {
     parse_rule "${line}"
     case $? in
     0) echo -e "  ${i}  | ${r_sport}\t| ${r_dhost}:${r_dport}" ;;
-    2) echo -e "  ${i}  | 其它类型 | ${line}（请用完整版 gost.sh 管理）" ;;
-    *) [[ -z ${line//[[:space:]]/} ]] || echo -e "  ${i}  | 无法解析 | ${line}" ;;
+    2) echo -e "  ${i}  | 其它类型 | ${r_type}（内容已隐藏，请用完整版 gost.sh 管理）" ;;
+    *) [[ -z ${line//[[:space:]]/} ]] || echo -e "  ${i}  | 无法解析 | 内容已隐藏，请手动查看 ${raw_conf_path}" ;;
     esac
     echo -e "--------------------------------------------------------"
   done <"${raw_conf_path}"
@@ -515,7 +543,12 @@ function show_banner() {
       color="${Red_font_prefix}"
     fi
     rules=$(count_rules)
-    echo -e "  ${color}●${Font_color_suffix} ${state} · gost ${ver:-未知} · 转发规则 ${rules} 条"
+    if has_foreign_rules; then
+      rules="${rules} 条（另有其它类型规则，请用完整版管理）"
+    else
+      rules="${rules} 条"
+    fi
+    echo -e "  ${color}●${Font_color_suffix} ${state} · gost ${ver:-未知} · 转发规则 ${rules}"
   else
     echo -e "  ${Red_font_prefix}●${Font_color_suffix} 未安装 · 选择 1 开始安装"
   fi
