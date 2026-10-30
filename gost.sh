@@ -5,7 +5,7 @@ Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warn="${Red_font_prefix}[警告]${Font_color_suffix}"
 Cyan_font_prefix="\033[36m"
 Bold="\033[1m"
-shell_version="1.2.6"
+shell_version="1.2.7"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
@@ -390,16 +390,63 @@ function Stop_ct() {
     echo "已停止"
   fi
 }
+# 重启并确认 gost 真的起来了; 起不来就回滚到上一份配置,
+# 避免"新增一条端口被占用的规则"把所有正在生效的转发一起带下去
+function restart_gost() {
+  local bak="${gost_conf_path}.bak"
+  systemctl restart gost
+  sleep 1
+  systemctl is-active --quiet gost && return 0
+  sleep 2
+  systemctl is-active --quiet gost && return 0
+  if [[ -f ${bak} ]]; then
+    warn "gost 未能启动，正在回滚到上一份配置 $(basename "${bak}")"
+    cp -a "${bak}" "${gost_conf_path}" && chmod 0600 "${gost_conf_path}"
+    systemctl restart gost
+    sleep 1
+    if systemctl is-active --quiet gost; then
+      warn "已回滚，本次改动未生效；请检查端口是否被其它程序占用后重试"
+      return 1
+    fi
+  fi
+  warn "gost 仍未启动，请执行 systemctl status gost 及 journalctl -u gost -n 50 查看原因"
+  return 1
+}
+
+# 改 rawconf 之前留快照: 重启失败时把规则一起撤回, 否则 rawconf 与 config.json 会对不上
+function snapshot_rawconf() {
+  raw_conf_snap=$(mktemp) || die "无法创建临时文件"
+  raw_conf_snap_had=0
+  if [[ -f ${raw_conf_path} ]]; then
+    cp -a "${raw_conf_path}" "${raw_conf_snap}" || die "备份 rawconf 失败"
+    raw_conf_snap_had=1
+  fi
+}
+function restore_rawconf() {
+  if ((raw_conf_snap_had)); then
+    if install -m 0644 "${raw_conf_snap}" "${raw_conf_path}"; then
+      warn "已撤销本次对 rawconf 的改动"
+    else
+      warn "恢复 rawconf 失败，请手动检查 ${raw_conf_path}"
+    fi
+  else
+    rm -f "${raw_conf_path}"
+  fi
+  [[ -n ${raw_conf_snap} ]] && rm -f "${raw_conf_snap}"
+}
+function commit_rawconf() {
+  [[ -n ${raw_conf_snap} ]] && rm -f "${raw_conf_snap}"
+}
+
 function Restart_ct() {
   regen_config || warn "配置重建失败，已回滚到上一份配置，继续以旧配置重启"
   if ((regen_stopped)); then
     echo "当前没有转发规则，gost 保持停止；执行菜单 7 新增规则后会自动启动"
     return 0
   fi
-  systemctl restart gost
-  sleep 1
-  systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
-  echo "已重读配置并重启"
+  if restart_gost; then
+    echo "已重读配置并重启"
+  fi
 }
 function read_protocol() {
   echo -e "请问您要设置哪种功能: "
@@ -511,11 +558,13 @@ function read_d_ip() {
     # 原来 touch 在当前工作目录建文件, 但生成的配置里写死 /root/xxx.txt:
     # 只要不是从 /root 运行脚本, 落地列表就建错地方, 均衡负载静默失效
     local peer_file="${peer_dir}/${flag_c}.txt"
+    local peer_tmp="${peer_file}.tmp.$$"
     if [[ -f ${peer_file} ]]; then
       read -r -e -p "${peer_file} 已存在，是否覆盖？[y/N]:" overwrite
       [[ ${overwrite} == [Yy] ]] || die "已取消，可先编辑 ${peer_file} 后再用菜单 6 重启生效"
     fi
-    mkdir -p "${peer_dir}" && : >"${peer_file}" || die "无法写入 ${peer_file}"
+    # 先写临时文件: 中途 Ctrl-C 或输入非法退出时, 原来的落地列表不会被清空
+    mkdir -p "${peer_dir}" && : >"${peer_tmp}" || die "无法写入 ${peer_dir}"
     echo -e "------------------------------------------------------------------"
     echo -e "请依次输入你要均衡负载的落地ip与端口"
     while true; do
@@ -526,10 +575,11 @@ function read_d_ip() {
       read -r -p "请输入: " peer_port
       valid_port "${peer_port}" "落地端口"
       peer_port=$((10#${peer_port}))
-      echo -e "$peer_ip:$peer_port" >>"${peer_file}"
+      echo -e "$peer_ip:$peer_port" >>"${peer_tmp}"
       read -r -e -p "是否继续添加落地？[Y/n]:" addyn
       [[ -z ${addyn} ]] && addyn="y"
       if [[ ${addyn} == [Nn] ]]; then
+        mv -f "${peer_tmp}" "${peer_file}" || die "写入 ${peer_file} 失败"
         echo -e "------------------------------------------------------------------"
         echo -e "已创建 ${peer_file}，您可以随时编辑该文件修改落地信息，重启gost即可生效"
         echo -e "------------------------------------------------------------------"
@@ -1369,19 +1419,23 @@ case "$num" in
   Restart_ct
   ;;
 7)
+  command -v gost >/dev/null 2>&1 || die "gost 尚未安装，请先执行菜单 1 安装"
+  snapshot_rawconf
   rawconf
   if regen_config; then
     if ((regen_stopped)); then
       warn "配置为空，服务保持停止"
-    else
-      systemctl restart gost
-      sleep 1
-      systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+      commit_rawconf
+    elif restart_gost; then
+      commit_rawconf
       echo -e "配置已生效，当前配置如下"
       echo -e "--------------------------------------------------------"
       show_all_conf
+    else
+      restore_rawconf
     fi
   else
+    restore_rawconf
     warn "新规则未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
   fi
   ;;
@@ -1389,22 +1443,25 @@ case "$num" in
   show_all_conf
   ;;
 9)
-  show_all_conf
+  show_all_conf || exit 0
   read -r -p "请输入你要删除的配置编号：" numdelete
   count_line=$(awk 'END{print NR}' "${raw_conf_path}" 2>/dev/null)
   # 原来只校验"含一个数字", "1e 命令" 这类输入能通过; GNU sed 的 e 地址修饰符会执行命令
   if [[ ${numdelete} =~ ^[0-9]+$ ]] && ((10#${numdelete} >= 1 && 10#${numdelete} <= ${count_line:-0})); then
+    snapshot_rawconf
     sed -i "${numdelete}d" "${raw_conf_path}"
     if regen_config; then
       if ((regen_stopped)); then
+        commit_rawconf
         echo -e "配置已删除，规则已清空，gost 服务已停止"
-      else
-        systemctl restart gost
-        sleep 1
-        systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
+      elif restart_gost; then
+        commit_rawconf
         echo -e "配置已删除，服务已重启"
+      else
+        restore_rawconf
       fi
     else
+      restore_rawconf
       warn "剩余配置未通过校验，已保留上一份配置；请用菜单 8 核对 rawconf 后重试"
     fi
   else
