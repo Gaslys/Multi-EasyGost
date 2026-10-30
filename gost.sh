@@ -7,6 +7,8 @@ shell_version="1.2.0"
 ct_new_ver="2.11.2" # 2.x 不再跟随官方更新
 gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
+# 自用 fork: 自检更新指向自己的仓库, 避免更新时把自己修的版本降级回上游
+update_url="https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost.sh"
 
 function die() {
   echo -e "${Error} $*" >&2
@@ -17,17 +19,32 @@ function warn() {
 }
 
 function checknew() {
-  checknew=$(gost -V 2>&1 | awk '{print $2}')
-  # check_new_ver
-  echo "你的gost版本为:""$checknew"""
+  command -v gost >/dev/null 2>&1 || die "gost 尚未安装，请先执行菜单 1 安装"
+  local old_ver backup_dir
+  old_ver=$(gost -V 2>&1 | awk '{print $2}')
+  echo "你的gost版本为:""$old_ver"""
   echo -n 是否更新\(y/n\)\:
-  read checknewnum
-  if test $checknewnum = "y"; then
-    cp -r /etc/gost /tmp/
+  read -r checknewnum
+  if [[ ${checknewnum} == [Yy] ]]; then
+    # 用 mktemp 备份: 原来固定备份到 /tmp/gost, 第二次更新时 /tmp/gost 已存在,
+    # cp -r 会变成 /tmp/gost/gost, 恢复后 rawconf 跑到子目录里, 转发配置全部丢失
+    backup_dir=$(mktemp -d "${HOME:-/root}/.gost-backup.XXXXXX") || die "无法创建备份目录"
+    if [[ -d /etc/gost ]]; then
+      cp -a /etc/gost/. "${backup_dir}/" || die "备份 /etc/gost 失败，已中止更新"
+    fi
     Install_ct
-    rm -rf /etc/gost
-    mv /tmp/gost /etc/
+    # Install_ct 会重建 /etc/gost（装着默认配置），这里把用户原有配置放回去
+    if [[ -f "${backup_dir}/rawconf" ]]; then
+      install -m 0644 "${backup_dir}/rawconf" "${raw_conf_path}" || warn "恢复 rawconf 失败"
+      if [[ -f "${backup_dir}/config.json" ]]; then
+        install -m 0644 "${backup_dir}/config.json" "${gost_conf_path}" || warn "恢复 config.json 失败"
+      fi
+      echo -e "${Info} 已恢复原有转发配置"
+    fi
+    rm -rf "${backup_dir}"
     systemctl restart gost
+    sleep 1
+    systemctl is-active --quiet gost || warn "gost 未能正常启动，请执行 systemctl status gost 查看原因"
   else
     exit 0
   fi
@@ -945,15 +962,39 @@ cron_restart() {
 }
 
 update_sh() {
-  ol_version=$(curl -L -s --connect-timeout 5 https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh | grep "shell_version=" | head -1 | awk -F '=|"' '{print $3}')
+  local ol_version tmp
+  ol_version=$(curl -fsSL --connect-timeout 5 --max-time 8 "${update_url}" 2>/dev/null | grep -m1 "shell_version=" | awk -F '=|"' '{print $3}')
+  # 只在远端版本严格更新时提示, 否则修改版本号后会被判定为"有新版本"并降级覆盖
+  newer=$(printf '%s\n%s\n' "${shell_version}" "${ol_version}" | sort -V | tail -n 1)
   if [ -n "$ol_version" ]; then
-    if [[ "$shell_version" != "$ol_version" ]]; then
+    if [[ -n ${newer} && ${newer} == "${ol_version}" && ${ol_version} != "${shell_version}" ]]; then
       echo -e "存在新版本，是否更新 [Y/N]?"
       read -r update_confirm
       case $update_confirm in
       [yY][eE][sS] | [yY])
-        wget -N --no-check-certificate https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh
-        echo -e "更新完成"
+        tmp=$(mktemp) || {
+          warn "无法创建临时文件，已保留当前脚本"
+          return 1
+        }
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$tmp" "${update_url}"; then
+          rm -f "$tmp"
+          warn "新版本下载失败，已保留当前脚本"
+          return 1
+        fi
+        # 先确认下到的是脚本而不是错误页，再原子替换。
+        # 原来是 wget -N 原地覆写正在执行的脚本, bash 边读边执行, 可能读到半截文件
+        if ! grep -q "^shell_version=" "$tmp"; then
+          rm -f "$tmp"
+          warn "下载内容不是有效脚本，已保留当前脚本"
+          return 1
+        fi
+        chmod 0755 "$tmp"
+        if ! mv -f "$tmp" "$0"; then
+          rm -f "$tmp"
+          warn "替换脚本失败，请手动下载更新"
+          return 1
+        fi
+        echo -e "更新完成，请重新运行脚本"
         exit 0
         ;;
       *) ;;
