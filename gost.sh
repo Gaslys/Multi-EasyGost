@@ -9,6 +9,7 @@ gost_conf_path="/etc/gost/config.json"
 raw_conf_path="/etc/gost/rawconf"
 # 自用 fork: 自检更新指向自己的仓库, 避免更新时把自己修的版本降级回上游
 update_url="https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost.sh"
+cron_file="/etc/cron.d/gost-restart"
 
 function die() {
   echo -e "${Error} $*" >&2
@@ -930,7 +931,7 @@ cron_restart() {
   echo -e "[2] 删除gost定时重启任务"
   echo -e "-----------------------------------"
   read -p "请选择: " numcron
-  if [ "$numcron" == "1" ]; then
+  if [[ ${numcron} == "1" ]]; then
     echo -e "------------------------------------------------------------------"
     echo -e "gost定时重启任务类型: "
     echo -e "-----------------------------------"
@@ -938,23 +939,39 @@ cron_restart() {
     echo -e "[2] 每日？点重启"
     echo -e "-----------------------------------"
     read -p "请选择: " numcrontype
-    if [ "$numcrontype" == "1" ]; then
+    local cron_line
+    if [[ ${numcrontype} == "1" ]]; then
       echo -e "-----------------------------------"
       read -p "每？小时重启: " cronhr
-      echo "0 0 */$cronhr * * ? * systemctl restart gost" >>/etc/crontab
-      echo -e "定时重启设置成功！"
-    elif [ "$numcrontype" == "2" ]; then
+      if ! [[ ${cronhr} =~ ^[0-9]+$ ]] || ((10#${cronhr} < 1 || 10#${cronhr} > 23)); then
+        die "小时数必须是 1-23 的整数"
+      fi
+      cron_line="0 */${cronhr} * * * root systemctl restart gost"
+    elif [[ ${numcrontype} == "2" ]]; then
       echo -e "-----------------------------------"
       read -p "每日？点重启: " cronhr
-      echo "0 0 $cronhr * * ? systemctl restart gost" >>/etc/crontab
-      echo -e "定时重启设置成功！"
+      if ! [[ ${cronhr} =~ ^[0-9]+$ ]] || ((10#${cronhr} > 23)); then
+        die "时刻必须是 0-23 的整数"
+      fi
+      cron_line="0 ${cronhr} * * * root systemctl restart gost"
     else
       echo "type error, please try again"
       exit
     fi
-  elif [ "$numcron" == "2" ]; then
-    sed -i "/gost/d" /etc/crontab
-    echo -e "定时重启任务删除完成！"
+    # 写独立文件而不是往 /etc/crontab 追加:
+    # 原来那行是 7 字段且星期位写成 "?", vixie/cronie 会判定语法错误整行丢弃,
+    # 而脚本照样提示"设置成功"; 删除时 sed /gost/d 还会误删别人的任务
+    mkdir -p /etc/cron.d || die "无法创建 /etc/cron.d"
+    echo "${cron_line}" >"${cron_file}" && chmod 0644 "${cron_file}" || die "写入定时任务失败"
+    echo -e "定时重启设置成功！"
+    systemctl is-active --quiet cron 2>/dev/null || systemctl is-active --quiet crond 2>/dev/null ||
+      warn "cron 服务似乎未运行，请确认已安装并启动 cron/crond"
+  elif [[ ${numcron} == "2" ]]; then
+    if [[ -f ${cron_file} ]]; then
+      rm -f "${cron_file}" && echo -e "定时重启任务删除完成！"
+    else
+      echo -e "未找到 gost 定时重启任务"
+    fi
   else
     echo "type error, please try again"
     exit
