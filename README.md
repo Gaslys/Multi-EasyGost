@@ -32,6 +32,18 @@ curl -fsSL -o gost.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2
 > 注：gost v2.11.2 功能稳定，本脚本固定使用该版本。脚本启动时会对比本仓库的版本号提示更新，
 > 不会把你更新回上游的旧版本。
 
+### 精简版 `gost-lite.sh`
+
+只做 tcp+udp 不加密转发，菜单只有 安装 / 新增 / 查看 / 删除 / 重启 / 卸载：
+
+```bash
+curl -fsSL -o gost-lite.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2/gost-lite.sh && chmod +x gost-lite.sh && ./gost-lite.sh
+```
+
+它和完整版共用 `/etc/gost/config.json` 与 `rawconf`，同一台机器上两个脚本可以互换。
+如果 `rawconf` 里已经有 ss / tls / ws 等其它类型的规则，精简版会拒绝重建配置并提示改用完整版，
+不会把这些规则写丢。精简版不带自更新，升级重新下载覆盖即可。
+
 ***
 ## 本 fork 相对上游的改动（1.2.x）
 
@@ -61,7 +73,8 @@ curl -fsSL -o gost.sh https://raw.githubusercontent.com/Gaslys/Multi-EasyGost/v2
 
 | 文件 | 用途 |
 | --- | --- |
-| `gost.sh` | 一键脚本本体，安装后由它管理 gost |
+| `gost.sh` | 完整版脚本，安装后由它管理 gost |
+| `gost-lite.sh` | 精简版脚本，只保留 tcp+udp 不加密转发 |
 | `gost.service` | systemd unit，安装时写入 `/usr/lib/systemd/system/` |
 | `config.json` | gost 默认配置示例，安装时由脚本生成到 `/etc/gost/` |
 
